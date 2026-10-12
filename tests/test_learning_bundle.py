@@ -3,12 +3,14 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -429,21 +431,237 @@ class BundleTests(unittest.TestCase):
         self.assertEqual(self.cli("build").returncode, 0)
         self.assertEqual(self.document()["version"], before)
 
+    def test_metadata_symlinks_refuse_before_either_pin_changes(self):
+        with tempfile.TemporaryDirectory() as outside:
+            sentinel = Path(outside) / "sentinel.json"
+            for relative in (bundle.FIXTURE_PATH, bundle.MANIFEST_PATH):
+                for dangling in (False, True):
+                    with self.subTest(path=relative, dangling=dangling):
+                        target = self.tree / relative
+                        original = target.read_bytes()
+                        other = self.tree / (
+                            bundle.MANIFEST_PATH
+                            if relative == bundle.FIXTURE_PATH
+                            else bundle.FIXTURE_PATH
+                        )
+                        before = other.read_bytes()
+                        sentinel.write_bytes(b"outside sentinel, not metadata\n")
+                        if dangling:
+                            sentinel.unlink()
+                        target.unlink()
+                        try:
+                            try:
+                                target.symlink_to(sentinel)
+                            except OSError as exc:
+                                self.skipTest(f"symlink creation unavailable: {exc}")
+                            result = self.cli("build", "--version", "17")
+                            self.assertEqual(result.returncode, 2, result.stderr)
+                            self.assertIn("error", json.loads(result.stderr))
+                            self.assertEqual(other.read_bytes(), before)
+                            self.assertEqual(sentinel.exists(), not dangling)
+                            if not dangling:
+                                self.assertEqual(
+                                    sentinel.read_bytes(),
+                                    b"outside sentinel, not metadata\n",
+                                )
+                        finally:
+                            target.unlink(missing_ok=True)
+                            target.write_bytes(original)
+
+    def test_metadata_parent_aliases_refuse_before_writes(self):
+        with tempfile.TemporaryDirectory() as outside:
+            for relative in (
+                "schemas",
+                "schemas/learning",
+                "schemas/learning/compat",
+            ):
+                with self.subTest(parent=relative):
+                    directory = self.tree / relative
+                    moved = Path(outside) / "redirected"
+                    before = {
+                        path.relative_to(directory): path.read_bytes()
+                        for path in directory.rglob("*")
+                        if path.is_file()
+                    }
+                    directory.rename(moved)
+                    try:
+                        try:
+                            directory.symlink_to(moved, target_is_directory=True)
+                        except OSError as exc:
+                            self.skipTest(f"symlink creation unavailable: {exc}")
+                        result = self.cli("build", "--version", "17")
+                        self.assertEqual(result.returncode, 2, result.stderr)
+                        self.assertEqual(
+                            {
+                                path.relative_to(moved): path.read_bytes()
+                                for path in moved.rglob("*")
+                                if path.is_file()
+                            },
+                            before,
+                        )
+                    finally:
+                        directory.unlink(missing_ok=True)
+                        moved.rename(directory)
+
+    def test_metadata_hardlinks_are_replaced_without_modifying_the_other_name(self):
+        with tempfile.TemporaryDirectory() as outside:
+            for relative in (bundle.FIXTURE_PATH, bundle.MANIFEST_PATH):
+                with self.subTest(path=relative):
+                    target = self.tree / relative
+                    original = target.read_bytes()
+                    sentinel = Path(outside) / target.name
+                    sentinel.write_bytes(original)
+                    target.unlink()
+                    os.link(sentinel, target)
+                    result = self.cli("build", "--bump")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(sentinel.read_bytes(), original)
+                    self.assertFalse(os.path.samefile(sentinel, target))
+                    self.assertEqual(self.cli("check").returncode, 0)
+
+    def test_nonfile_metadata_refuses_before_the_other_pin_changes(self):
+        target = self.tree / bundle.MANIFEST_PATH
+        before = (self.tree / bundle.FIXTURE_PATH).read_bytes()
+        target.unlink()
+        target.mkdir()
+        result = self.cli("build", "--version", "17")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual((self.tree / bundle.FIXTURE_PATH).read_bytes(), before)
+        self.assertTrue(target.is_dir())
+
+    def test_metadata_reparse_points_refuse_before_writes(self):
+        real_lstat = Path.lstat
+        for relative in (
+            bundle.MANIFEST_PATH,
+            bundle.FIXTURE_PATH,
+            "schemas/learning",
+        ):
+            with self.subTest(path=relative):
+                target = self.tree / relative
+                before = {
+                    path: (self.tree / path).read_bytes()
+                    for path in (bundle.MANIFEST_PATH, bundle.FIXTURE_PATH)
+                }
+
+                def reparse(path, *args, **kwargs):
+                    info = real_lstat(path, *args, **kwargs)
+                    if path == target:
+                        return SimpleNamespace(
+                            **{
+                                name: getattr(info, name)
+                                for name in dir(info)
+                                if name.startswith("st_")
+                                and name != "st_file_attributes"
+                            },
+                            st_file_attributes=0x400,
+                        )
+                    return info
+
+                with mock.patch.object(Path, "lstat", reparse):
+                    with self.assertRaisesRegex(bundle.BundleError, "alias|ordinary"):
+                        bundle.build_manifest(self.tree, bump=True)
+                for path, data in before.items():
+                    self.assertEqual((self.tree / path).read_bytes(), data)
+
+    @unittest.skipUnless(sys.platform == "win32", "native Windows junction")
+    def test_metadata_parent_junction_refuses_without_writes(self):
+        with tempfile.TemporaryDirectory() as outside:
+            directory = self.tree / "schemas/learning/compat"
+            moved = Path(outside) / "redirected"
+            directory.rename(moved)
+            try:
+                made = subprocess.run(
+                    ["cmd", "/d", "/c", "mklink", "/J", str(directory), str(moved)],
+                    capture_output=True,
+                    check=False,
+                )
+                if made.returncode:
+                    self.skipTest(f"junction unavailable: {made.stderr!r}")
+                before = (moved / "FIXTURES.json").read_bytes()
+                result = self.cli("build", "--bump")
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual((moved / "FIXTURES.json").read_bytes(), before)
+            finally:
+                if directory.exists():
+                    directory.rmdir()
+                moved.rename(directory)
+
+    def test_late_metadata_alias_refuses_and_cleans_staged_files(self):
+        with tempfile.TemporaryDirectory() as outside:
+            sentinel = Path(outside) / "sentinel.json"
+            sentinel.write_bytes(b"outside sentinel\n")
+            target = self.tree / bundle.MANIFEST_PATH
+            before = (self.tree / bundle.FIXTURE_PATH).read_bytes()
+            real_fixture_manifest = bundle.fixture_manifest
+
+            def swap_after_inventory(root, version):
+                result = real_fixture_manifest(root, version)
+                target.unlink()
+                try:
+                    target.symlink_to(sentinel)
+                except OSError as exc:
+                    self.skipTest(f"symlink creation unavailable: {exc}")
+                return result
+
+            with mock.patch.object(bundle, "fixture_manifest", swap_after_inventory):
+                with self.assertRaises(bundle.BundleError):
+                    bundle.build_manifest(self.tree, bump=True)
+            self.assertEqual(sentinel.read_bytes(), b"outside sentinel\n")
+            self.assertEqual((self.tree / bundle.FIXTURE_PATH).read_bytes(), before)
+            self.assertEqual(list((self.tree / "schemas").rglob("*.tmp")), [])
+
+    def test_atomic_replacement_does_not_follow_a_last_moment_leaf_alias(self):
+        with tempfile.TemporaryDirectory() as outside:
+            sentinel = Path(outside) / "sentinel.json"
+            sentinel.write_bytes(b"outside sentinel\n")
+            target = self.tree / bundle.FIXTURE_PATH
+            real_replace = os.replace
+
+            def swap_then_replace(source, destination):
+                if destination == target:
+                    target.unlink()
+                    try:
+                        target.symlink_to(sentinel)
+                    except OSError as exc:
+                        self.skipTest(f"symlink creation unavailable: {exc}")
+                return real_replace(source, destination)
+
+            with mock.patch.object(bundle.os, "replace", swap_then_replace):
+                bundle.build_manifest(self.tree, bump=True)
+            self.assertEqual(sentinel.read_bytes(), b"outside sentinel\n")
+            self.assertFalse(target.is_symlink())
+            self.assertEqual(self.cli("check").returncode, 0)
+
+    def test_failed_staging_keeps_both_pins_and_removes_owned_temporary_files(self):
+        before = {
+            path: (self.tree / path).read_bytes()
+            for path in (bundle.MANIFEST_PATH, bundle.FIXTURE_PATH)
+        }
+        with mock.patch.object(
+            bundle.os, "fsync", side_effect=OSError("staging failure")
+        ):
+            with self.assertRaisesRegex(OSError, "staging failure"):
+                bundle.build_manifest(self.tree, bump=True)
+        for path, data in before.items():
+            self.assertEqual((self.tree / path).read_bytes(), data)
+        self.assertEqual(list((self.tree / "schemas").rglob("*.tmp")), [])
+
     def test_partial_metadata_write_is_detected_and_recoverable(self):
         version = self.document()["version"]
         target = self.tree / bundle.MANIFEST_PATH
         original = target.read_bytes()
-        real_write = Path.write_text
+        real_replace = os.replace
 
-        def fail_manifest(path, *args, **kwargs):
-            if path == target:
+        def fail_manifest(source, destination):
+            if destination == target:
                 raise PermissionError("synthetic metadata interruption")
-            return real_write(path, *args, **kwargs)
+            return real_replace(source, destination)
 
-        with mock.patch.object(Path, "write_text", fail_manifest):
+        with mock.patch.object(bundle.os, "replace", fail_manifest):
             with self.assertRaisesRegex(PermissionError, "synthetic"):
                 bundle.build_manifest(self.tree, bump=True)
         self.assertEqual(target.read_bytes(), original)
+        self.assertEqual(list((self.tree / "schemas").rglob("*.tmp")), [])
         result = self.cli("check")
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertEqual(

@@ -5,9 +5,12 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
+import stat
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = "schemas/learning/BUNDLE.json"
@@ -265,9 +268,105 @@ def _read_fixture_lock(root):
     return document
 
 
+def _metadata_state(root, relative):
+    """Inspect an output and its in-root parents without following aliases."""
+    target = root / relative
+    parents = []
+    parts = PurePosixPath(relative).parts
+    directories = [root] + [root.joinpath(*parts[:i]) for i in range(1, len(parts))]
+    for directory in directories:
+        info = directory.lstat()
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or (getattr(info, "st_file_attributes", 0) or 0) & 0x400
+        ):
+            raise BundleError(
+                f"metadata parent must be an ordinary directory: {directory}"
+            )
+        parents.append((info.st_dev, info.st_ino))
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
+        return parents, None
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or (getattr(info, "st_file_attributes", 0) or 0) & 0x400
+    ):
+        raise BundleError(
+            f"metadata target must be an ordinary file, not an alias: {target}"
+        )
+    return parents, (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_nlink,
+    )
+
+
+def _write_metadata(root, documents, expected):
+    """Stage owned sibling files, then replace entries instead of writing through them.
+
+    Identity checks narrow races, but are not a concurrent directory lock. Each
+    replacement is atomic; the pair is not a transaction (check detects a split).
+    """
+    staged = []
+    try:
+        for relative, value in documents:
+            if _metadata_state(root, relative) != expected[relative]:
+                raise BundleError(f"metadata changed before staging: {relative}")
+            target = root / relative
+            fd, name = tempfile.mkstemp(
+                prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+            )
+            temporary = Path(name)
+            temporary_relative = temporary.relative_to(root).as_posix()
+            identity = os.fstat(fd)
+            owned = (identity.st_dev, identity.st_ino)
+            staged.append((relative, temporary_relative, owned))
+            with os.fdopen(fd, "wb") as stream:
+                stream.write((json.dumps(value, indent=2) + "\n").encode("utf-8"))
+                stream.flush()
+                os.fsync(stream.fileno())
+        # Validate every destination before publishing either document.
+        for relative in expected:
+            if _metadata_state(root, relative) != expected[relative]:
+                raise BundleError(f"metadata changed before publication: {relative}")
+        for relative, temporary_relative, owned in staged:
+            if _metadata_state(root, relative) != expected[relative]:
+                raise BundleError(f"metadata changed during publication: {relative}")
+            parents, info = _metadata_state(root, temporary_relative)
+            if parents != expected[relative][0] or info is None or info[:2] != owned:
+                raise BundleError(
+                    f"staged metadata identity changed: {temporary_relative}"
+                )
+            os.replace(root / temporary_relative, root / relative)
+    finally:
+        retained = []
+        for relative, temporary_relative, owned in staged:
+            try:
+                parents, info = _metadata_state(root, temporary_relative)
+                if info is None:
+                    continue
+                if parents != expected[relative][0] or info[:2] != owned:
+                    raise BundleError("staging identity changed")
+                (root / temporary_relative).unlink()
+            except (OSError, BundleError):
+                retained.append(temporary_relative)
+        if retained:
+            raise BundleError(
+                f"metadata staging cleanup refused; retained: {retained}"
+            )
+
+
 def build_manifest(root, *, bump=False, version=None):
     """Refresh both pins; changed or unpinned fixtures require a version advance."""
-    root = Path(root)
+    root = Path(root).absolute()
+    expected = {
+        relative: _metadata_state(root, relative)
+        for relative in (FIXTURE_PATH, MANIFEST_PATH)
+    }
     previous = None
     if (root / MANIFEST_PATH).exists():
         try:
@@ -300,11 +399,9 @@ def build_manifest(root, *, bump=False, version=None):
         raise BundleError(
             "compatibility fixtures changed or unpinned; build --bump required"
         )
-    # A failed second write leaves a detectable version mismatch, never a green check.
-    for relative, value in ((FIXTURE_PATH, fixtures), (MANIFEST_PATH, document)):
-        (root / relative).write_text(
-            json.dumps(value, indent=2) + "\n", encoding="utf-8", newline="\n"
-        )
+    _write_metadata(
+        root, ((FIXTURE_PATH, fixtures), (MANIFEST_PATH, document)), expected
+    )
 
 
 class _Parser(argparse.ArgumentParser):
