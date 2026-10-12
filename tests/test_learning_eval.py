@@ -363,7 +363,7 @@ class ReviewEvidenceBindingTests(unittest.TestCase):
                     labels(arm, {c["id"]: "pass" for c in inputs["cases"]})
                     for arm in ("baseline", "candidate")
                 ]
-                next(l for l in labelled if l["variant"] == variant)["labels"][
+                next(lab for lab in labelled if lab["variant"] == variant)["labels"][
                     "case_clone-1"
                 ] = "fail"
                 with self.assertRaisesRegex(ev.EvalRefusal, "conflicting.*evidence"):
@@ -623,7 +623,8 @@ class RefusalTests(unittest.TestCase):
     def test_an_inconsistent_experience_ledger_refuses(self):
         inputs = load()
         moved = copy.deepcopy(inputs["experiences"][0])
-        moved.update(observed_at="2026-09-03T00:00:00Z", split_key="elsewhere")
+        moved["observed_at"] = "2026-09-03T00:00:00Z"
+        moved["split_key"] = "elsewhere"
         inputs["experiences"].append(moved)
         self.assertRefused("inconsistent", inputs)
 
