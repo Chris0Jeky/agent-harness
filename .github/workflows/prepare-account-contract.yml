@@ -1,0 +1,83 @@
+name: Prepare account contract documentation
+
+on:
+  push:
+    branches: [chatgpt/prepare-account-contract-pass4]
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: f5b886e484d4ccc2f2d4421352c282e548b6620b
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.11'
+      - name: Apply only the reviewed canonical paragraph
+        shell: python
+        run: |
+          import hashlib
+          from pathlib import Path
+          def blob(data):
+              return hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+          path = Path('SPECS.md')
+          data = path.read_bytes()
+          assert blob(data) == 'd6b6fdaa1f0bf0497cd92389fad24274c549042e'
+          old = (
+              "finding cluster, one correction key). The first observation fixes an experience's `source` and\n"
+              "split key: `fold_experiences` refuses a later observation that changes either, so a run never\n"
+              "moves across the split. Offline evaluation and replay gates carry `holdout_digest` (sha256 of\n"
+          ).encode()
+          new = (
+              "finding cluster, one correction key). The first observation fixes an experience's `source.kind`,\n"
+              "`source.key` and split key: `fold_experiences` refuses later changes to these identity fields, so\n"
+              "an existing run never moves across the split. Optional `source.account` is producer-supplied\n"
+              "attribution (a 1-64 character string), not identity or authority; it may be added or corrected on\n"
+              "later observations without changing the experience ID or default split key. Outcome events\n"
+              "retain only source kind/key in `run`; consumers join `experience` for account attribution.\n"
+              "Offline evaluation and replay gates carry `holdout_digest` (sha256 of\n"
+          ).encode()
+          assert data.count(old) == 1
+          updated = data.replace(old, new)
+          assert blob(updated) == '13f67d14286c19e4b2f6b2f00a0aac7c5f1b7d40'
+          path.write_bytes(updated)
+      - name: Verify the complete candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          test "$(git diff --name-only)" = SPECS.md
+          python scripts/learning_bundle.py check
+          python -m unittest discover -s tests -p 'test_*.py' -v
+          python templates/hooks/smoke_test.py
+      - name: Record Doctor without claiming installed qualification
+        shell: bash
+        run: |
+          set +e
+          python harness.py doctor
+          code=$?
+          echo "DOCTOR_EXIT=$code (hosted workspace; not native activation evidence)"
+          test "$code" -le 1
+      - name: Store only the verified blob, never a branch or merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' > "$RUNNER_TEMP/account-contract-blob.json"
+          import json
+          from pathlib import Path
+          print(json.dumps({'content': Path('SPECS.md').read_text('utf-8'), 'encoding': 'utf-8'}))
+          PY
+          sha=$(gh api --method POST repos/Chris0Jeky/agent-harness/git/blobs --input "$RUNNER_TEMP/account-contract-blob.json" --jq .sha)
+          test "$sha" = 13f67d14286c19e4b2f6b2f00a0aac7c5f1b7d40
+          echo "VERIFIED_DOCUMENT_BLOB=$sha"
+          echo 'No product branch, PR, or main ref was updated by this workflow.'
