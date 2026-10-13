@@ -1,6 +1,6 @@
 {
   "schema": "learning-contract-bundle/v1",
-  "version": 1,
+  "version": 2,
   "files": [
     {
       "path": "schemas/learning/candidate-genome.schema.json",
