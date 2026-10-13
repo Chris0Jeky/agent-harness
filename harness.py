@@ -7916,7 +7916,12 @@ def sync_paths_overlap(left: Path, right: Path) -> bool:
     """Return whether resolved names or existing ancestor identities overlap."""
     left = left.resolve(strict=False)
     right = right.resolve(strict=False)
-    if worktree_path_is_within(left, right) or worktree_path_is_within(right, left):
+    # WindowsPath folds case even on native case-sensitive directories.
+    if str(left) == str(right) or any(
+        str(inner) == str(ancestor)
+        for inner, outer in ((left, right), (right, left))
+        for ancestor in outer.parents
+    ):
         return True
     try:
         for inner, outer in ((left, right), (right, left)):
@@ -11350,6 +11355,20 @@ def sync_global(args: argparse.Namespace) -> int:
     for index, (_source, target) in enumerate(selected_actions):
         for _other_source, other in selected_actions[:index]:
             if sync_trees_overlap(target, other):
+                try:
+                    collision = str(target.resolve()) == str(
+                        other.resolve()
+                    ) or target.samefile(other)
+                except FileNotFoundError:
+                    collision = False
+                except OSError as exc:
+                    raise HarnessError(
+                        f"cannot compare selected skill destinations: {exc}"
+                    ) from exc
+                if collision:
+                    raise HarnessError(
+                        f"selected skill roots collide: {target}; {other}"
+                    )
                 raise HarnessError(
                     f"selected skill destinations overlap: {target}; {other}"
                 )
