@@ -766,6 +766,8 @@ CORPUS_CACHE_META_KEY = "replay_corpus_cache"
 def write_artifact(path: Path, chunks: Iterable[bytes]) -> None:
     """Use the harness's permission-preserving writer without buffering a corpus."""
     try:
+        # Ordinary output parents may alias (/var on macOS); keep the leaf un-followed.
+        path = path.parent.resolve() / path.name
         writer = load_dispatch("replay_artifact_writer", REPO_ROOT / "harness.py")
         mode = (
             stat.S_IMODE(path.stat().st_mode)
@@ -776,7 +778,7 @@ def write_artifact(path: Path, chunks: Iterable[bytes]) -> None:
             writer.write_managed_codex_file(path, chunks, mode)
         except writer.HarnessError as error:
             raise OSError(str(error)) from error
-    except ReplayHarnessError as error:
+    except (ReplayHarnessError, RuntimeError) as error:
         raise OSError(str(error)) from error
 
 

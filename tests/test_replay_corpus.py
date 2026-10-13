@@ -2450,6 +2450,50 @@ class AtomicReplayArtifactTests(EndToEndTestCase):
     transcript scan and no global policy execution.
     """
 
+    def test_parent_alias_is_bound_without_relaxing_managed_writer(self):
+        writer = replay.load_dispatch(
+            "replay_parent_alias_writer", replay.REPO_ROOT / "harness.py"
+        )
+        real = self.dir / "real"
+        real.mkdir()
+        alias = self.dir / "alias"
+        if replay.os.name == "nt":
+            result = subprocess.run(
+                ["cmd", "/d", "/c", "mklink", "/J", str(alias), str(real)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+        else:
+            alias.symlink_to(real, target_is_directory=True)
+        try:
+            target = alias / "nested" / "cache.jsonl"
+            with self.assertRaisesRegex(writer.HarnessError, "path alias"):
+                writer.write_managed_codex_file(target, b"rejected")
+            replay.save_corpus(target, {"git status": {"codex": 1}}, {})
+            self.assertEqual(
+                replay.load_corpus(real / "nested" / "cache.jsonl")[0],
+                {"git status": {"codex": 1, "claude": 0}},
+            )
+            self.assertEqual(list((real / "nested").glob(".harness-agent-*")), [])
+        finally:
+            if replay.os.name == "nt":
+                alias.rmdir()
+            else:
+                alias.unlink()
+
+    @unittest.skipIf(replay.os.name == "nt", "file symlinks need Windows privilege")
+    def test_output_leaf_alias_is_still_refused_without_touching_its_target(self):
+        target = self.dir / "prior.json"
+        target.write_bytes(b"prior fictional bytes")
+        alias = self.dir / "output.json"
+        alias.symlink_to(target)
+        with self.assertRaisesRegex(OSError, "path alias"):
+            replay.write_artifact(alias, [b"replacement"])
+        self.assertEqual(target.read_bytes(), b"prior fictional bytes")
+        self.assertTrue(alias.is_symlink())
+        self.assertEqual(list(self.dir.glob(".harness-agent-*")), [])
+
     def test_save_corpus_late_serialization_failure_keeps_prior_bytes_and_no_temp(self):
         cache = self.dir / "cache.jsonl"
         replay.save_corpus(
