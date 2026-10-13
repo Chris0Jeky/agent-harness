@@ -752,7 +752,9 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   cross-filesystem rename boundaries before reserving recovery space or copying bytes.
   Overlap checks compare selected source/live roots and their ordinary directory descendants
   with observed path ancestor identities, including same-device bind-mount containment;
-  lexical resolution alone is insufficient. They do not walk unrelated home trees.
+  selected tree pairs are compared bidirectionally before backup or pruning, including
+  live descendants that alias source descendants. Lexical resolution alone is insufficient.
+  They do not walk unrelated home trees.
   Sources may be copied from another filesystem; live targets and rename recovery storage
   must share a filesystem. Device equality is necessary, not proof every rename will succeed.
   A post-promotion inspection error follows the same quarantine/restore path as a digest

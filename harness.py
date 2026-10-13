@@ -7937,25 +7937,61 @@ def sync_paths_overlap(left: Path, right: Path) -> bool:
     return False
 
 
-def sync_source_overlaps_path(source: Path, path: Path) -> bool:
-    """Compare one selected source tree's directory identities against a path."""
-    if sync_paths_overlap(source, path):
-        return True
+def sync_tree_directory_paths(source: Path) -> tuple[Path, ...]:
+    """Enumerate only a selected, ordinary tree's root and directory entries."""
     try:
         mode = source.stat().st_mode
     except FileNotFoundError:
-        return False
+        return (source,)
     except OSError as exc:
         raise HarnessError(f"cannot inspect sync source {source}: {exc}") from exc
     if not stat.S_ISDIR(mode):
-        return False
+        return (source,)
     kinds = skill_tree_entry_kinds(source)
     if kinds is None:
-        return False
-    return any(
-        sync_paths_overlap(source.joinpath(*PurePosixPath(relative).parts), path)
-        for relative, kind in kinds.items()
-        if kind == "directory"
+        return (source,)
+    return (
+        source,
+        *(
+            source.joinpath(*PurePosixPath(relative).parts)
+            for relative, kind in kinds.items()
+            if kind == "directory"
+        ),
+    )
+
+
+def sync_source_overlaps_path(source: Path, path: Path) -> bool:
+    """Compare a selected tree against one nonrecursive path boundary."""
+    return sync_paths_overlap(source, path) or any(
+        sync_paths_overlap(directory, path)
+        for directory in sync_tree_directory_paths(source)[1:]
+    )
+
+
+def sync_trees_overlap(left: Path, right: Path) -> bool:
+    """Compare selected source/live directories in both directions before writes."""
+    if sync_paths_overlap(left, right):
+        return True
+
+    def identities(paths: tuple[Path, ...]) -> set[tuple[int, int]]:
+        observed = set()
+        for path in paths:
+            try:
+                info = path.stat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise HarnessError(
+                    f"cannot inspect selected sync tree {path}: {exc}"
+                ) from exc
+            observed.add((info.st_dev, info.st_ino))
+        return observed
+
+    left_ids = identities(sync_tree_directory_paths(left))
+    right_ids = identities(sync_tree_directory_paths(right))
+    return bool(
+        left_ids & (right_ids | identities(tuple(right.parents)))
+        or right_ids & identities(tuple(left.parents))
     )
 
 
@@ -7998,7 +8034,7 @@ def preflight_claude_skill(source: Path, target: Path) -> tuple[str, str | None,
         raise HarnessError(
             f"Claude skill source is missing ordinary SKILL.md: {source}"
         )
-    if sync_source_overlaps_path(source, target):
+    if sync_trees_overlap(source, target):
         raise HarnessError(
             f"Claude skill source and destination overlap: {source}; {target}"
         )
@@ -10615,7 +10651,7 @@ def validate_bundle_targets(components: list[dict[str, Any]]) -> None:
                 f"bundle destinations collide: {seen[target_key]}; {target}"
             )
         for earlier in seen.values():
-            if sync_paths_overlap(earlier, target):
+            if sync_trees_overlap(earlier, target):
                 raise HarnessError(f"bundle destinations overlap: {earlier}; {target}")
         seen[target_key] = target
 
@@ -10672,7 +10708,7 @@ def load_sync_bundle(
         source_digest = bundle_component_digest(kind, source, "bundle source")
         if source_digest is None:
             raise HarnessError(f"missing bundle source: {source}")
-        if sync_source_overlaps_path(source, target):
+        if sync_trees_overlap(source, target):
             raise HarnessError(
                 f"bundle source and destination overlap: {source}; {target}"
             )
@@ -10692,7 +10728,7 @@ def load_sync_bundle(
     validate_bundle_targets(components)
     for component in components:
         for other in components:
-            if sync_source_overlaps_path(other["source"], component["target"]):
+            if sync_trees_overlap(other["source"], component["target"]):
                 raise HarnessError(
                     "bundle source and destination sets overlap: "
                     f"{other['source']}; {component['target']}"
@@ -11284,6 +11320,19 @@ def sync_global(args: argparse.Namespace) -> int:
         (config_root / "skills" / name, claude_home / "skills" / name)
         for name in sorted(selected_claude_skills)
     ]
+    selected_actions = [*skill_actions, *claude_skill_actions]
+    for source, _target in selected_actions:
+        for _other_source, target in selected_actions:
+            if sync_trees_overlap(source, target):
+                raise HarnessError(
+                    f"selected skill source and destination overlap: {source}; {target}"
+                )
+    for index, (_source, target) in enumerate(selected_actions):
+        for _other_source, other in selected_actions[:index]:
+            if sync_trees_overlap(target, other):
+                raise HarnessError(
+                    f"selected skill destinations overlap: {target}; {other}"
+                )
     # Both families can be pointed at the same parent. Validate their combined
     # names before either lane plans recovery or mutates a live destination.
     preflight_selected_skill_roots(

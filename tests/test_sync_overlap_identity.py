@@ -3,7 +3,9 @@
 from contextlib import redirect_stdout
 import io
 import json
+import os
 from pathlib import Path
+import stat
 import unittest
 from unittest import mock
 
@@ -26,16 +28,21 @@ class SyncOverlapIdentityTests(unittest.TestCase):
             alias.mkdir(parents=True)
         before = harness.tree_digest(source), set(source.rglob("*"))
         before_home = set(home.rglob("*"))
-        real_samefile = Path.samefile
+        real_stat = Path.stat
         identity_source = source if identity_source is None else identity_source
 
-        def identity(path, other):
-            if {path, Path(other)} == {identity_source, alias}:
-                return True
-            return real_samefile(path, other)
+        def identity(path, *args, **kwargs):
+            info = real_stat(path, *args, **kwargs)
+            if path == alias:
+                values = list(info)
+                source_info = real_stat(identity_source)
+                values[stat.ST_DEV] = source_info.st_dev
+                values[stat.ST_INO] = source_info.st_ino
+                return os.stat_result(values)
+            return info
 
         with (
-            mock.patch.object(Path, "samefile", identity),
+            mock.patch.object(Path, "stat", identity),
             mock.patch.object(harness, "reserve_backup_root") as reserve,
             mock.patch.object(harness, "copy_bundle_component") as bundle_copy,
             mock.patch.object(harness.shutil, "copytree") as tree_copy,
@@ -150,6 +157,88 @@ class SyncOverlapIdentityTests(unittest.TestCase):
                 harness.sync_source_overlaps_path(root / "absent", root / "target")
             )
             walk.assert_not_called()
+
+    def test_live_descendant_identity_refuses_before_backup_or_pruning(self):
+        for lane in ("bundle", "skill", "codex"):
+            for nested_source in (False, True):
+                for apply in (False, True):
+                    with self.subTest(
+                        lane=lane, nested_source=nested_source, apply=apply
+                    ):
+                        name = f"live-{lane}-{nested_source}-{apply}"
+                        if lane == "bundle":
+                            config, home, bin_home, args = (
+                                self.fixture.make_bundle_sync_fixture(name)
+                            )
+                            source = config / "muse/recipes"
+                            target = bin_home / "muse-recipes"
+                        elif lane == "skill":
+                            config, home, args = (
+                                self.fixture.make_claude_skill_sync_fixture(name)
+                            )
+                            source = config / "skills/sample"
+                            target = home / "skills/sample"
+                        else:
+                            source, target, _skills_home, args = (
+                                self.fixture.make_sync_global_skill_fixture(name)
+                            )
+                            home = Path(args.codex_home)
+                            args.only = ["skill:sample"]
+                        home.mkdir(parents=True, exist_ok=True)
+                        descendant = source / "assets"
+                        descendant.mkdir()
+                        (descendant / "sentinel.txt").write_bytes(b"preserve source")
+                        alias = target / "assets"
+                        alias.mkdir(parents=True)
+                        (target / "SKILL.md").write_bytes(b"old skill")
+                        (alias / "sentinel.txt").write_bytes(b"preserve source")
+                        identity_source = descendant if nested_source else source
+                        real_stat = Path.stat
+
+                        def identity(path, *args, **kwargs):
+                            info = real_stat(path, *args, **kwargs)
+                            if path == alias:
+                                values = list(info)
+                                source_info = real_stat(identity_source)
+                                values[stat.ST_DEV] = source_info.st_dev
+                                values[stat.ST_INO] = source_info.st_ino
+                                return os.stat_result(values)
+                            return info
+
+                        args.apply = apply
+                        before = harness.tree_digest(source), harness.tree_digest(
+                            target
+                        )
+                        with (
+                            mock.patch.object(Path, "stat", identity),
+                            mock.patch.object(
+                                harness,
+                                "reserve_backup_root",
+                                side_effect=AssertionError("backup reached"),
+                            ) as reserve,
+                            mock.patch.object(
+                                harness,
+                                "remove_skill_tree_entry",
+                                side_effect=AssertionError("pruning reached"),
+                            ) as prune,
+                            mock.patch.object(
+                                harness.shutil,
+                                "copytree",
+                                side_effect=AssertionError("copy reached"),
+                            ) as copy,
+                            redirect_stdout(io.StringIO()),
+                        ):
+                            with self.assertRaisesRegex(
+                                harness.HarnessError, "overlap"
+                            ):
+                                harness.sync_global(args)
+                            reserve.assert_not_called()
+                            prune.assert_not_called()
+                            copy.assert_not_called()
+                        self.assertEqual(
+                            before,
+                            (harness.tree_digest(source), harness.tree_digest(target)),
+                        )
 
     def test_lexical_overlap_and_absent_disjoint_paths(self):
         root = Path(self.fixture.temp.name)
