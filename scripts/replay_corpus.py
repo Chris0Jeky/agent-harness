@@ -2547,6 +2547,43 @@ def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _paths_collide(first: Path, second: Path) -> bool:
+    """Compare exact resolved names and observed filesystem identity."""
+    try:
+        return str(first.resolve()) == str(second.resolve()) or first.samefile(second)
+    except FileNotFoundError:
+        return False
+
+
+def check_output_collisions(
+    baseline: Path,
+    candidate: Path,
+    from_corpus: Path | None,
+    corpus_cache: Path | None,
+    json_path: Path | None,
+) -> str | None:
+    """Refuse observed input/output overlap without creating filesystem probes."""
+    inputs = [("--baseline", baseline), ("--candidate", candidate)]
+    if from_corpus is not None:
+        inputs.append(("--from-corpus", from_corpus))
+    outputs = [
+        (label, path)
+        for label, path in (("--corpus-cache", corpus_cache), ("--json", json_path))
+        if path is not None
+    ]
+    for index, (label, path) in enumerate(outputs):
+        for other_label, other in inputs + outputs[:index]:
+            try:
+                if _paths_collide(path, other):
+                    return f"{label} {path} collides with {other_label} {other}"
+            except (OSError, RuntimeError) as error:
+                return (
+                    f"{label} {path} cannot be proven distinct from "
+                    f"{other_label} {other}: {type(error).__name__}: {error}"
+                )
+    return None
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -2657,6 +2694,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    collision = check_output_collisions(
+        args.baseline,
+        args.candidate,
+        args.from_corpus,
+        args.corpus_cache,
+        args.json_path,
+    )
+    if collision is not None:
+        sys.stderr.write(f"cannot replay: {collision}\n")
+        return EXIT_TOOL_FAILURE
     tiers = sorted(set(args.tiers)) if args.tiers else list(DEFAULT_TIERS)
     overlays = sorted(set(args.flags or ()))
     flags = {name: True for name in overlays}
@@ -2887,6 +2934,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     result["run"]["allow_errors"] = bool(args.allow_errors)
 
     if args.json_path:
+        # A first publication can reveal previously absent filesystem name aliases.
+        collision = check_output_collisions(
+            args.baseline,
+            args.candidate,
+            args.from_corpus,
+            args.corpus_cache,
+            args.json_path,
+        )
+        if collision is not None:
+            sys.stderr.write(f"cannot replay: {collision}\n")
+            return EXIT_TOOL_FAILURE
         try:
             payload = json.dumps(result, indent=2) + "\n"
             write_artifact(
