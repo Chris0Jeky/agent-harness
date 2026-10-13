@@ -1087,6 +1087,53 @@ class CommandLineTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertIn("refused", err)
 
+    def test_nonfinite_thresholds_refuse_without_a_report(self):
+        for value in ("nan", "inf", "-inf"):
+            with self.subTest(value=value):
+                code, out, err = self.cli("--min-delta=" + value)
+                self.assertEqual(code, 2)
+                self.assertEqual(out, "")
+                self.assertIn("refused", err)
+
+    def test_record_extensions_refuse_values_that_cannot_be_published_as_json(self):
+        cycle = []
+        cycle.append(cycle)
+        for value in (float("inf"), {"unsupported"}, cycle):
+            record = load()["baseline"]
+            record["ext"] = {"fixture": {"value": value}}
+            with self.subTest(value_type=type(value).__name__):
+                self.assertTrue(
+                    any(
+                        "not finite JSON" in error
+                        for error in lc.validate_record(record)
+                    )
+                )
+
+    def test_record_extensions_preserve_finite_values_and_large_integers(self):
+        record = load()["baseline"]
+        record["ext"] = {"fixture": {"finite": 1e308, "large_integer": 10**1000}}
+        self.assertEqual(lc.validate_record(record), [])
+
+    def test_finite_cost_overflow_refuses_without_a_report(self):
+        inputs = load()
+        with tempfile.TemporaryDirectory() as temporary:
+            files = []
+            for variant in ("baseline", "candidate_outputs"):
+                for row in inputs[variant]["outputs"].values():
+                    row["seconds"] = 1e308
+                self.assertEqual(lc.validate_record(inputs[variant]), [])
+                path = Path(temporary) / f"{variant}.json"
+                path.write_text(
+                    json.dumps(inputs[variant], allow_nan=False), encoding="utf-8"
+                )
+                files.append(path)
+            code, out, err = self.cli(
+                "--baseline", str(files[0]), "--candidate-outputs", str(files[1])
+            )
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("refused", err)
+
 
 if __name__ == "__main__":
     unittest.main()

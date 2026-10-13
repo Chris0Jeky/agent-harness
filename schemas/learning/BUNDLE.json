@@ -76,7 +76,7 @@
     },
     {
       "path": "scripts/learning_contracts.py",
-      "sha256": "ce9fce2f0fa0588707ca84de47da39c61cf94bab826baa340366d8992ceab299"
+      "sha256": "733f431176c469f4dd2abaad56b694341f29700ba2d697417f7295eda022f7ae"
     }
   ],
   "record_schemas": [
@@ -95,5 +95,5 @@
     "promotion-record/v1",
     "system-run/v1"
   ],
-  "digest": "e358d86bb68a102bf55d9bbdfa6a066d82be34e0d88b9ffd6835974ff4144190"
+  "digest": "1fb112b6ce89779ecd15d677f603965b233879d055d8156d5bc6586b1be1f626"
 }
