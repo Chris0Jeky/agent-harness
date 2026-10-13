@@ -634,6 +634,7 @@ def extract_codex_commands(
     root: Path,
     stats: Counter[str],
     include_embedded: bool = True,
+    transcript_inputs: list[Path] | None = None,
 ) -> Iterator[str]:
     """Yield every shell command Codex requested, oldest rollout first.
 
@@ -646,6 +647,8 @@ def extract_codex_commands(
     tool, and no `js_repl` body contains a `tools.shell_command(` call.
     """
     for path in iter_transcripts(root, stats):
+        if transcript_inputs is not None:
+            transcript_inputs.append(path)
         stats["extracted-codex-files"] += 1
         for record in iter_jsonl(path, stats):
             payload = record.get("payload")
@@ -693,9 +696,13 @@ def extract_codex_commands(
                     yield command
 
 
-def extract_claude_commands(root: Path, stats: Counter[str]) -> Iterator[str]:
+def extract_claude_commands(
+    root: Path, stats: Counter[str], transcript_inputs: list[Path] | None = None
+) -> Iterator[str]:
     """Yield every command Claude's Bash/PowerShell tools were asked to run."""
     for path in iter_transcripts(root, stats):
+        if transcript_inputs is not None:
+            transcript_inputs.append(path)
         stats["extracted-claude-files"] += 1
         for record in iter_jsonl(path, stats):
             message = record.get("message")
@@ -732,6 +739,7 @@ def build_corpus(
     codex_root: Path | None,
     claude_root: Path | None,
     include_embedded: bool = True,
+    transcript_inputs: list[Path] | None = None,
 ) -> tuple[dict[str, dict[str, int]], Counter[str]]:
     """Return {command: {runtime: invocations}} plus a parse-failure ledger."""
     stats: Counter[str] = Counter()
@@ -739,12 +747,19 @@ def build_corpus(
     sources: list[tuple[str, Iterator[str]]] = []
     if codex_root is not None and codex_root.is_dir():
         sources.append(
-            ("codex", extract_codex_commands(codex_root, stats, include_embedded))
+            (
+                "codex",
+                extract_codex_commands(
+                    codex_root, stats, include_embedded, transcript_inputs
+                ),
+            )
         )
     elif codex_root is not None:
         stats["unparsed-codex-root-missing"] += 1
     if claude_root is not None and claude_root.is_dir():
-        sources.append(("claude", extract_claude_commands(claude_root, stats)))
+        sources.append(
+            ("claude", extract_claude_commands(claude_root, stats, transcript_inputs))
+        )
     elif claude_root is not None:
         stats["unparsed-claude-root-missing"] += 1
     for runtime, stream in sources:
@@ -2561,11 +2576,13 @@ def check_output_collisions(
     from_corpus: Path | None,
     corpus_cache: Path | None,
     json_path: Path | None,
+    transcript_inputs: Sequence[Path] = (),
 ) -> str | None:
     """Refuse observed input/output overlap without creating filesystem probes."""
     inputs = [("--baseline", baseline), ("--candidate", candidate)]
     if from_corpus is not None:
         inputs.append(("--from-corpus", from_corpus))
+    inputs.extend(("scanned transcript", path) for path in transcript_inputs)
     outputs = [
         (label, path)
         for label, path in (("--corpus-cache", corpus_cache), ("--json", json_path))
@@ -2722,6 +2739,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if root is None
     ]
     cache_had_ledger = True
+    transcript_inputs: list[Path] | None = (
+        [] if args.corpus_cache or args.json_path else None
+    )
     if args.from_corpus:
         try:
             corpus, cached_integrity, cache_had_ledger = load_corpus(args.from_corpus)
@@ -2740,7 +2760,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if progress:
             sys.stderr.write("scanning transcripts...\n")
         corpus, stats = build_corpus(
-            args.codex_root, args.claude_root, not args.no_embedded
+            args.codex_root, args.claude_root, not args.no_embedded, transcript_inputs
         )
     # Classified here, not after the replay, because the two ways a run can end
     # up with nothing are not the same answer. Every transcript failing to open
@@ -2759,6 +2779,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             return EXIT_CORPUS_INCOMPLETE
         sys.stderr.write("no commands extracted; nothing to replay\n")
         return 1
+    if transcript_inputs:
+        collision = check_output_collisions(
+            args.baseline,
+            args.candidate,
+            args.from_corpus,
+            args.corpus_cache,
+            args.json_path,
+            transcript_inputs,
+        )
+        if collision is not None:
+            sys.stderr.write(f"cannot replay: {collision}\n")
+            return EXIT_TOOL_FAILURE
     if args.corpus_cache:
         try:
             save_corpus(args.corpus_cache, corpus, corpus_failures)
@@ -2941,6 +2973,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.from_corpus,
             args.corpus_cache,
             args.json_path,
+            transcript_inputs or (),
         )
         if collision is not None:
             sys.stderr.write(f"cannot replay: {collision}\n")
