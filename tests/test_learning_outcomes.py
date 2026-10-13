@@ -412,5 +412,151 @@ class StreamTests(unittest.TestCase):
         self.assertIn("appears twice", outcomes.stream_errors(events + events[:1])[0])
 
 
+class StreamValidationTests(unittest.TestCase):
+    def events(self):
+        events, errors = outcomes.events_from_experiences(history())
+        self.assertEqual(errors, [])
+        return events
+
+    def readers(self):
+        return {
+            "latest": outcomes.latest,
+            "posterior": lambda rows: outcomes.posterior(rows, "example", "test-gaps"),
+            "lessons": outcomes.lesson_eligible,
+            "recurrences": lambda rows: outcomes.recurrences(rows, "failure_keys"),
+            "cursor": lambda rows: outcomes.read_since(
+                rows, {"observed_at": None, "id": None}
+            ),
+        }
+
+    def test_stream_errors_reports_malformed_records_without_indexing_them(self):
+        bad_time = self.events()[0]
+        bad_time["observed_at"] = "not-a-time"
+        for record in (None, 42, [], {}, experience(), bad_time):
+            with self.subTest(record=record):
+                try:
+                    problems = outcomes.stream_errors([record])
+                except (KeyError, TypeError, AttributeError) as exc:
+                    self.fail(f"malformed record escaped diagnostic validation: {exc}")
+                self.assertTrue(problems)
+                self.assertTrue(all(isinstance(problem, str) for problem in problems))
+
+    def test_every_reader_refuses_malformed_gap_and_duplicate_inputs(self):
+        events = self.events()
+        populations = {
+            "malformed": [None],
+            "wrong-schema": [experience()],
+            "gap": [events[0], events[2]],
+            "duplicate": events + events[:1],
+        }
+        for shape, rows in populations.items():
+            for name, read in self.readers().items():
+                with self.subTest(shape=shape, reader=name):
+                    try:
+                        with self.assertRaisesRegex(ValueError, "outcome stream"):
+                            read(iter(rows))
+                    except (KeyError, TypeError, AttributeError) as exc:
+                        self.fail(f"unclassified reader failure: {exc}")
+
+    def test_matured_nonmerged_runs_are_not_accepted_as_outcome_evidence(self):
+        for immediate in ("published", "completed", "failed"):
+            for matured in ("clean", "reverted"):
+                event = self.events()[0]
+                event["observed_at"] = "2026-09-10T00:00:00Z"
+                event["outcome"] = {
+                    "immediate": immediate,
+                    "matured": matured,
+                    "regression": matured == "reverted",
+                }
+                event["success"] = lc.experience_succeeded(event)
+                for name, read in self.readers().items():
+                    with self.subTest(
+                        immediate=immediate, matured=matured, reader=name
+                    ):
+                        with self.assertRaisesRegex(ValueError, "only a merged run"):
+                            read([event])
+
+    def test_version_chronology_cannot_move_backwards(self):
+        events = self.events()
+        events[0]["observed_at"] = "2026-09-09T00:00:00Z"
+        # Each record still satisfies its own schema/at-order checks.
+        self.assertTrue(all(lc.validate_record(row) == [] for row in events))
+        for name, read in self.readers().items():
+            with self.subTest(reader=name):
+                with self.assertRaisesRegex(ValueError, "observed_at.*backward"):
+                    read(reversed(events))
+
+    def test_equal_instants_and_input_permutations_remain_valid(self):
+        events = self.events()
+        for row, timestamp in zip(
+            events,
+            (
+                "2026-09-09T00:00:00Z",
+                "2026-09-09T00:00:00.0Z",
+                "2026-09-09T00:00:00.000Z",
+            ),
+        ):
+            row["observed_at"] = timestamp
+        self.assertEqual(outcomes.stream_errors(events), [])
+        for name, read in self.readers().items():
+            with self.subTest(reader=name):
+                self.assertEqual(read(iter(events)), read(reversed(events)))
+        self.assertEqual(outcomes.posterior(events, "example", "test-gaps"), (1, 2))
+
+    def test_invalid_cursor_shapes_are_classified(self):
+        for cursor in (
+            None,
+            [],
+            {},
+            {"id": None},
+            {"observed_at": None},
+            {"id": None, "observed_at": None, "extra": True},
+            {"id": "", "observed_at": "2026-09-09T00:00:00Z"},
+        ):
+            with self.subTest(cursor=cursor):
+                try:
+                    with self.assertRaisesRegex(ValueError, "cursor"):
+                        outcomes.read_since(self.events(), cursor)
+                except (KeyError, TypeError, AttributeError) as exc:
+                    self.fail(f"invalid cursor escaped classification: {exc}")
+
+    def test_posterior_cli_rejects_reverse_chronology_without_results(self):
+        events = self.events()
+        events[0]["observed_at"] = "2026-09-09T00:00:00Z"
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "events.jsonl"
+            source.write_text(
+                "".join(lc._canonical(row) + "\n" for row in events), encoding="utf-8"
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts/learning_outcomes.py"),
+                    "posterior",
+                    "--events",
+                    str(source),
+                    "--repo",
+                    "example",
+                    "--recipe",
+                    "test-gaps",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(json.loads(result.stderr)["status"], "refused")
+
+    def test_empty_complete_stream_is_valid_for_all_readers(self):
+        self.assertEqual(outcomes.latest([]), {})
+        self.assertEqual(outcomes.posterior([], "example", "test-gaps"), (1, 1))
+        self.assertEqual(outcomes.lesson_eligible([]), set())
+        self.assertEqual(outcomes.recurrences([], "failure_keys"), set())
+        cursor = {"observed_at": None, "id": None}
+        self.assertEqual(outcomes.read_since([], cursor), ([], cursor))
+
+
 if __name__ == "__main__":
     unittest.main()
