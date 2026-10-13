@@ -2,36 +2,35 @@
 
 ## Source acceptance (2026-10-13)
 
-Observed published source is `main@6749bcf2b4c9cddcfe6ccb4bf865b0eeb83b9409`
-(#546). Earlier snapshots below remain historical.
+Observed published source: `main@67a60279435c459c51e127ecee78f13a2a380b91` (#562). Earlier sections are historical.
 
 | Surface | Accepted source | Limit |
 |---|---|---|
-| Bundle and outcomes | #541/#544 reject the reproduced alias/metadata and malformed-stream cases | No concurrent-writer or multi-artifact crash-atomicity claim |
-| Regex evidence | #542 bounds pathological evaluation and refuses incomplete evidence | Cost-only refusal remains conservative |
-| Account attribution | #543 adds optional, mutable account metadata and bundle/fixture v3 | Kind/key remain identity; account is not authorization or a partition |
-| Local operator and Pages | #545 shares the Python inventory; #546 restores complete README navigation/licensing and valid image links | Staged source and hosted rendered Pages build are distinct proofs |
-| Canary chronology | #548 requires the current claimed start and observation at or after the candidate/genome cutoff | Latest-observation folding does not retain immutable assignment history (#520/#517) |
-| Workspace scrub QA | #550 proves raw and JSON-escaped path redaction with a failing negative control | Regression coverage does not establish universal redaction |
+| Bundle/outcome stream | #541/#544 reject reproduced alias/metadata and malformed-stream cases | No concurrent-writer or multi-artifact crash-atomicity claim |
+| Regex evidence | #542 bounds pathological evaluation and refuses incomplete evidence | Cost-only refusal stays conservative |
+| Account attribution | #543 adds optional mutable metadata and bundle/fixture v3 | Kind/key remain identity; account is not authorization or a partition |
+| Operator/Pages source | #545 shares the check inventory; #546 repairs README and Pages source | Hosted rendering is a separate proof |
+| Canary chronology | #548 checks claimed start/latest observation against the candidate/genome cutoff | Immutable assignment remains #520/#517 |
+| Workspace scrub QA | #550 covers raw/JSON-escaped paths with a negative control | No universal redaction claim |
+| Replay publication | #555 privately stages streamed cache/report bytes and binds only caller parents | Existing target security is preserved; no multi-output transaction |
+| Sync identities | #559 checks selected source/live directories bidirectionally before backup/pruning | Native bind mounts/absent suffix lookup remain #523; walk cost #556 |
+| Replay input collisions | #560 checks named inputs, actual visited transcripts and other outputs before publication | Existing scanner coverage and concurrent-change limits remain |
+| SVG examples | #561 shows current 1.8.1 decisions under an explicit fictional wall posture and ordinary backups | Eight local frames verified; no host health/trust assertion |
+| Finite record JSON | #562 refuses NaN/Inf/computed overflow/non-JSON values; canonical byte pin refreshed | v3 fixture lock unchanged; non-string in-process key roundtrip remains #563 |
 
-Supplying or correcting account attribution does not create a new experience identity,
-outcome-event version or posterior. Bundle metadata is v3; sibling consumer vendoring was
-not performed by this campaign.
+Each source head has full local unit/smoke/style/compile proof and hosted checks. At #562:
+2,098 unit tests (75 skips), 2,473 smoke checks; platform/privilege skips remain explicit.
+Doctor exits 1: source 1.8.1 differs from installed 1.8.0 dispatcher/matrix bytes, and the
+worktree canonical comparison is unproven. No runtime upgrade masked that result.
 
-Each merged source head has recorded local proving checks and hosted CI. Full source unit
-and smoke gates passed, with platform/privilege skips recorded. Doctor consistently exits 1:
-source 1.8.1 differs from installed 1.8.0 dispatcher/matrix bytes, and the worktree's canonical
-branch comparison is unproven. No runtime upgrade was performed to mask that result.
+#539/#549 were closed as superseded by #559/#555; their original failures and review ceilings
+remain history. The older advisory outcome-ledger parsing gap is #558, distinct from the
+learning outcome stream and record validator. Synthetic old/new strict-verifier pairings pass
+for matching copies and refuse crossed validator bytes; no deployed adopter was inspected.
 
-#549 is unmerged: its macOS run actually started and failed because the reused managed
-writer rejects the `/var` ancestor alias. #551 tracks a source caller-path repair that must
-preserve private staging before bytes are written. #539 is also parked for its confirmed
-alias-delete defect and red CI. Neither failure is treated as absent or flaky CI.
-
-Installed hooks/Muse, runtime trust, live canaries, consumer adoption and private corpus
-qualification were not established here. [HUMAN_TODO.md](../HUMAN_TODO.md) remains the
-owner-action record; H-18, H-19 and H-22 are still open. Historical worker artifacts were
-preserved outside Git before owned worktrees were retired; unrelated trees were untouched.
+Installed hooks/Muse, trust/canaries, consumer adoption and private corpus qualification remain
+separate. [HUMAN_TODO.md](../HUMAN_TODO.md) retains H-18/H-19/H-22. Needed raw receipts/patches
+were preserved outside Git before owned-tree retirement; unrelated/primary files were preserved.
 
 > **Licence decision (2026-08-12):** Owner-authored repository content is now
 > `GPL-3.0-only`, with the curl-derived fixture retained under curl's licence.
