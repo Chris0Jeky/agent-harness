@@ -6791,13 +6791,19 @@ def run_smoke():
             ),
         ]
     )
-    uncertain_cwd_decision, _reason = dispatch_module.check(
-        "cd $TARGET && git push origin main",
-        sensitive_cfg,
-        HERE,
-        HERE,
-        remote_resolver=lambda _args, _cwd, _globals: (False, "private"),
-    )
+    # The case needs TARGET unset; a host that defines it would resolve a known cwd (claude-config#425).
+    target_original = os.environ.pop("TARGET", None)
+    try:
+        uncertain_cwd_decision, _reason = dispatch_module.check(
+            "cd $TARGET && git push origin main",
+            sensitive_cfg,
+            HERE,
+            HERE,
+            remote_resolver=lambda _args, _cwd, _globals: (False, "private"),
+        )
+    finally:
+        if target_original is not None:
+            os.environ["TARGET"] = target_original
     sensitive_remote_cases.append(
         (
             "sensitive push after uncertain cwd transition",
