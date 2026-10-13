@@ -22,6 +22,7 @@
   "tests/test_command_prefixes.py",
   "tests/test_replay_corpus.py",
   "tests/test_skill_tree_mode_digest.py",
+  "tests/test_sync_overlap_identity.py",
   "tests/test_managed_agent_atomic.py",
   "tests/test_bundle_rollback_storage.py",
   "tests/test_bundle_preflight_recovery.py",
