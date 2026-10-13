@@ -61,6 +61,8 @@ def run(key, variant, immediate="merged", matured="clean", corrected=False, **ex
             }
         )
     record.update(extra)
+    if "started_at" not in extra:
+        record["started_at"] = record["at"]
     return record
 
 
@@ -179,7 +181,7 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(report["arms"]["candidate"]["runs"], 0)
         self.assertEqual(report["arms"]["baseline"]["runs"], 0)
 
-    def test_run_starting_before_cutoff_but_observed_after_is_ineligible(self):
+    def test_run_ending_before_cutoff_but_observed_after_is_ineligible(self):
         runs = []
         for i in range(20):
             runs.append(run(f"sb{i}", BASE, at=HIST_AT, observed_at=POST_OBS))
@@ -187,6 +189,21 @@ class CompareTests(unittest.TestCase):
         report = self.compare(runs)
         self.assertEqual((report["verdict"], report["gate"]), ("insufficient", None))
         self.assertEqual(report["arms"]["candidate"]["runs"], 0)
+
+    def test_run_starting_before_cutoff_but_ending_after_is_ineligible(self):
+        runs = arms()
+        for record in runs:
+            record["started_at"] = HIST_AT
+        report = self.compare(runs)
+        self.assertEqual((report["verdict"], report["gate"]), ("insufficient", None))
+        self.assertEqual(report["arms"]["candidate"]["runs"], 0)
+        self.assertEqual(report["arms"]["baseline"]["runs"], 0)
+
+    def test_missing_start_time_uses_end_time(self):
+        runs = arms()
+        for record in runs:
+            del record["started_at"]
+        self.assertEqual(self.compare(runs)["verdict"], "pass")
 
     def test_genome_later_than_candidate_sets_the_cutoff(self):
         # candidate.at is 11:00, genome.at is 11:05: a run at 11:02 is too early.

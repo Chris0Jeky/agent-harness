@@ -179,7 +179,7 @@ def compare(
         if record["id"] in training:
             excluded += 1
             continue
-        run_at = contracts.parse_time(record.get("at"))
+        run_at = contracts.parse_time(record.get("started_at") or record.get("at"))
         observed_at = contracts.parse_time(record.get("observed_at"))
         if (
             run_at is None
