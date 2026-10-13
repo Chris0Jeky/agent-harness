@@ -21,6 +21,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 from collections import Counter
 from pathlib import Path
 
@@ -2881,6 +2882,210 @@ class CorpusIntegrityTests(unittest.TestCase):
                 replay._worker_run = real_worker_run
         self.assertIn("1 of 2", str(caught.exception))
         self.assertIn("not usable", str(caught.exception))
+
+
+class OutputCollisionTests(EndToEndTestCase):
+    """#553: an output must never overwrite an input, nor the other output.
+
+    Each case drives `main()` with a fictional corpus and allow-only stub
+    floors, then asserts exit 3, intact input bytes, empty success stdout and
+    no staging file. The disjoint control proves a clean run still publishes
+    both the cache and the report.
+    """
+
+    def assert_collision(self, argv, intact, absent=()):
+        code, out, err = self.run_main(*argv)
+        self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
+        self.assertEqual(out, "")
+        self.assertNotIn("block rate by tier", out)
+        self.assertNotIn("Traceback", err)
+        self.assertIn("cannot replay:", err)
+        self.assertIn("collide", err.lower())
+        for path, before in intact.items():
+            self.assertEqual(path.read_bytes(), before, f"{path} was overwritten")
+        for path in absent:
+            self.assertFalse(path.exists(), f"staging file {path} was created")
+        return err
+
+    def base_argv(self, corpus, baseline, candidate):
+        return [
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(baseline),
+            "--candidate",
+            str(candidate),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--quiet",
+        ]
+
+    def test_json_collides_with_baseline(self):
+        corpus = self.write_corpus("git status")
+        floor = self.write_dispatch("floor", "1.0.0", 'return "allow", ""')
+        intact = {corpus: corpus.read_bytes(), floor: floor.read_bytes()}
+        self.assert_collision(
+            [*self.base_argv(corpus, floor, floor), "--json", str(floor)], intact
+        )
+
+    def test_json_collides_with_candidate(self):
+        corpus = self.write_corpus("git status")
+        baseline = self.write_dispatch("baseline", "1.0.0", 'return "allow", ""')
+        candidate = self.write_dispatch("candidate", "1.0.0", 'return "allow", ""')
+        intact = {
+            corpus: corpus.read_bytes(),
+            baseline: baseline.read_bytes(),
+            candidate: candidate.read_bytes(),
+        }
+        self.assert_collision(
+            [*self.base_argv(corpus, baseline, candidate), "--json", str(candidate)],
+            intact,
+        )
+
+    def test_cache_collides_with_baseline(self):
+        corpus = self.write_corpus("git status")
+        floor = self.write_dispatch("floor", "1.0.0", 'return "allow", ""')
+        intact = {corpus: corpus.read_bytes(), floor: floor.read_bytes()}
+        self.assert_collision(
+            [*self.base_argv(corpus, floor, floor), "--corpus-cache", str(floor)],
+            intact,
+        )
+
+    def test_json_collides_with_from_corpus(self):
+        corpus = self.write_corpus("git status")
+        floor = self.write_dispatch("floor", "1.0.0", 'return "allow", ""')
+        intact = {corpus: corpus.read_bytes(), floor: floor.read_bytes()}
+        self.assert_collision(
+            [*self.base_argv(corpus, floor, floor), "--json", str(corpus)],
+            intact,
+        )
+
+    def test_same_absent_cache_and_report_collide(self):
+        corpus = self.write_corpus("git status")
+        floor = self.write_dispatch("floor", "1.0.0", 'return "allow", ""')
+        shared = self.dir / "shared.jsonl"
+        intact = {corpus: corpus.read_bytes(), floor: floor.read_bytes()}
+        self.assert_collision(
+            [
+                *self.base_argv(corpus, floor, floor),
+                "--corpus-cache",
+                str(shared),
+                "--json",
+                str(shared),
+            ],
+            intact,
+            absent=[shared],
+        )
+
+    def test_hardlink_output_collides_with_input(self):
+        corpus = self.write_corpus("git status")
+        floor = self.write_dispatch("floor", "1.0.0", 'return "allow", ""')
+        link = self.dir / "floor_link.py"
+        try:
+            os_module.link(str(floor), str(link))
+        except OSError as error:
+            self.skipTest(f"hardlinks unavailable: {error}")
+        intact = {
+            corpus: corpus.read_bytes(),
+            floor: floor.read_bytes(),
+            link: link.read_bytes(),
+        }
+        self.assert_collision(
+            [*self.base_argv(corpus, floor, floor), "--json", str(link)], intact
+        )
+
+    def test_parent_alias_output_collides_with_input(self):
+        from tests.test_harness import HarnessTests
+
+        corpus = self.write_corpus("git status")
+        real_dir = self.dir / "real"
+        real_dir.mkdir()
+        floor = real_dir / "floor.py"
+        floor.write_text(
+            STUB_DISPATCH.format(version="1.0.0", decide='    return "allow", ""'),
+            encoding="utf-8",
+        )
+        alias = self.dir / "alias"
+        remove_alias = HarnessTests.make_directory_alias(self, real_dir, alias)
+        try:
+            intact = {corpus: corpus.read_bytes(), floor: floor.read_bytes()}
+            self.assert_collision(
+                [
+                    *self.base_argv(corpus, floor, floor),
+                    "--json",
+                    str(alias / "floor.py"),
+                ],
+                intact,
+            )
+        finally:
+            remove_alias()
+
+    def test_identity_inspection_failure_refuses_before_publication(self):
+        corpus = self.write_corpus("git status")
+        floor = self.write_dispatch("floor", "1.0.0", 'return "allow", ""')
+        report = self.dir / "report.json"
+        for error in (
+            PermissionError("identity unavailable"),
+            RuntimeError("alias loop"),
+        ):
+            with self.subTest(error=type(error).__name__), mock.patch.object(
+                replay, "_paths_collide", side_effect=error
+            ):
+                code, out, err = self.run_main(
+                    *self.base_argv(corpus, floor, floor), "--json", str(report)
+                )
+            self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
+            self.assertEqual(out, "")
+            self.assertIn("cannot be proven distinct", err)
+            self.assertFalse(report.exists())
+
+    def test_output_case_names_follow_the_directorys_native_lookup(self):
+        corpus = self.write_corpus("git status")
+        floor = self.write_dispatch("floor", "1.0.0", 'return "allow", ""')
+        cache, report = self.dir / "case.jsonl", self.dir / "CASE.jsonl"
+        cache.write_bytes(b"name-only fixture")
+        aliases = report.exists()
+        cache.unlink()
+        code, out, err = self.run_main(
+            *self.base_argv(corpus, floor, floor),
+            "--corpus-cache",
+            str(cache),
+            "--json",
+            str(report),
+        )
+        if aliases:
+            self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
+            self.assertEqual(out, "")
+            self.assertIn("collide", err)
+            self.assertEqual(set(replay.load_corpus(cache)[0]), {"git status"})
+        else:
+            self.assertEqual(code, 0)
+            self.assertEqual(set(replay.load_corpus(cache)[0]), {"git status"})
+            self.assertIn("tiers", json.loads(report.read_text(encoding="utf-8")))
+
+    def test_disjoint_cache_and_report_succeed(self):
+        corpus = self.write_corpus("git status", "git log")
+        floor = self.write_dispatch("floor", "1.0.0", 'return "allow", ""')
+        cache = self.dir / "cache.jsonl"
+        report = self.dir / "report.json"
+        code, out, _ = self.run_main(
+            *self.base_argv(corpus, floor, floor),
+            "--corpus-cache",
+            str(cache),
+            "--json",
+            str(report),
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("block rate by tier", out)
+        loaded, _, recorded = replay.load_corpus(cache)
+        self.assertEqual(set(loaded), {"git status", "git log"})
+        self.assertTrue(recorded)
+        payload = json.loads(report.read_text(encoding="utf-8"))
+        self.assertIn("2", payload["tiers"])
+        self.assertIn("baseline", payload["tiers"]["2"])
+        self.assertIn("candidate", payload["tiers"]["2"])
 
 
 if __name__ == "__main__":

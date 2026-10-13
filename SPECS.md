@@ -750,6 +750,11 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   or logical home. Used homes remain alias-free and distinct. Preview and apply both reject
   recovery storage that aliases or overlaps a source/live component, and reject observed
   cross-filesystem rename boundaries before reserving recovery space or copying bytes.
+  Overlap checks compare selected source/live roots and their ordinary directory descendants
+  with observed path ancestor identities, including same-device bind-mount containment;
+  selected tree pairs are compared bidirectionally before backup or pruning, including
+  live descendants that alias source descendants. Lexical resolution alone is insufficient.
+  They do not walk unrelated home trees.
   Sources may be copied from another filesystem; live targets and rename recovery storage
   must share a filesystem. Device equality is necessary, not proof every rename will succeed.
   A post-promotion inspection error follows the same quarantine/restore path as a digest
