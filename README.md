@@ -1,6 +1,6 @@
 # agent-harness
 
-<p align="center"><img src="docs/assets/agent-harness-loop.svg" alt="agent-harness workflow, animated" width="100%"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/Chris0Jeky/agent-harness/main/docs/assets/agent-harness-loop.svg" alt="agent-harness workflow, animated" width="100%"></p>
 
 The tier model, shared deny floor, and audit tools for the Codex and Claude repositories in this estate: what a repo is allowed to lose, what an argv line can prove, and whether the hook that claims to enforce it is actually wired.
 
@@ -31,7 +31,7 @@ This checkout is tier 3 (`workshop`), push free, merge free, with `"floor_wiring
 
 ## Architecture
 
-<p align="center"><img src="docs/assets/architecture.svg" alt="agent-harness architecture" width="100%"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/Chris0Jeky/agent-harness/main/docs/assets/architecture.svg" alt="agent-harness architecture" width="100%"></p>
 
 ```mermaid
 flowchart TB
