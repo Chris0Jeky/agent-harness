@@ -1087,6 +1087,34 @@ class CommandLineTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertIn("refused", err)
 
+    def test_nonfinite_thresholds_refuse_without_a_report(self):
+        for value in ("nan", "inf", "-inf"):
+            with self.subTest(value=value):
+                code, out, err = self.cli("--min-delta=" + value)
+                self.assertEqual(code, 2)
+                self.assertEqual(out, "")
+                self.assertIn("refused", err)
+
+    def test_finite_cost_overflow_refuses_without_a_report(self):
+        inputs = load()
+        with tempfile.TemporaryDirectory() as temporary:
+            files = []
+            for variant in ("baseline", "candidate_outputs"):
+                for row in inputs[variant]["outputs"].values():
+                    row["seconds"] = 1e308
+                self.assertEqual(lc.validate_record(inputs[variant]), [])
+                path = Path(temporary) / f"{variant}.json"
+                path.write_text(
+                    json.dumps(inputs[variant], allow_nan=False), encoding="utf-8"
+                )
+                files.append(path)
+            code, out, err = self.cli(
+                "--baseline", str(files[0]), "--candidate-outputs", str(files[1])
+            )
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("refused", err)
+
 
 if __name__ == "__main__":
     unittest.main()
