@@ -29,7 +29,11 @@
       "required": ["kind", "key"],
       "properties": {
         "kind": {"$ref": "common.schema.json#/$defs/slug"},
-        "key": {"type": "string", "minLength": 1, "maxLength": 400}
+        "key": {"type": "string", "minLength": 1, "maxLength": 400},
+        "account": {
+          "description": "Optional producer account attribution, not an identity component or an authority claim. Omit when unknown.",
+          "type": "string", "minLength": 1, "maxLength": 64
+        }
       }
     },
     "repo": {"$ref": "common.schema.json#/$defs/repo"},
