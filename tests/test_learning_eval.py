@@ -10,8 +10,11 @@ import io
 import json
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
@@ -63,6 +66,375 @@ def labels(variant, verdicts, evaluator=JUDGE):
         "evaluator": evaluator,
         "labels": verdicts,
     }
+
+
+class EvaluationEvidenceSafetyTests(unittest.TestCase):
+    def test_candidate_retrieval_failures_stay_in_the_denominator(self):
+        expected = run()["results"]["retrieval"]["n"]
+        for output in (None, {"error": "synthetic failure"}, {"text": "no items"}):
+            with self.subTest(output=output):
+                inputs = load()
+                case = next(
+                    c for c in inputs["cases"] if c["oracle"]["kind"] == "ranked_recall"
+                )
+                outputs = inputs["candidate_outputs"]["outputs"]
+                if output is None:
+                    outputs.pop(case["id"])
+                else:
+                    outputs[case["id"]] = output
+                retrieval = run(inputs)["results"]["retrieval"]
+                self.assertEqual(retrieval["n"], expected)
+                self.assertAlmostEqual(
+                    retrieval["candidate"]["mrr"], (expected - 1) / expected
+                )
+                self.assertAlmostEqual(
+                    retrieval["candidate"]["recall_at_k"], (expected - 1) / expected
+                )
+
+    def test_all_failed_retrievals_still_report_both_arms(self):
+        inputs = load()
+        expected = run()["results"]["retrieval"]["n"]
+        for case in inputs["cases"]:
+            if case["oracle"]["kind"] == "ranked_recall":
+                for variant in ("baseline", "candidate_outputs"):
+                    inputs[variant]["outputs"].pop(case["id"], None)
+        retrieval = run(inputs)["results"]["retrieval"]
+        self.assertIsNotNone(retrieval)
+        self.assertEqual(retrieval["n"], expected)
+        for variant in ("baseline", "candidate"):
+            self.assertEqual(retrieval[variant], {"recall_at_k": 0.0, "mrr": 0.0})
+
+    def test_retrieval_gate_cannot_hide_rank_or_recall_regressions(self):
+        for rank_only in (False, True):
+            with self.subTest(rank_only=rank_only):
+                inputs = load()
+                for case in inputs["cases"]:
+                    if case["oracle"]["kind"] == "ranked_recall":
+                        items = case["oracle"]["expected_items"]
+                        inputs["baseline"]["outputs"][case["id"]] = {"items": items}
+                        inputs["candidate_outputs"]["outputs"][case["id"]] = {
+                            "items": ["irrelevant", *items] if rank_only else []
+                        }
+                # Other case wins are still statistically sufficient, but cannot
+                # license a regression in the gate's named retrieval metrics.
+                self.assertEqual(run(inputs, gate="offline_eval")["verdict"], "pass")
+                report = run(inputs)
+                self.assertEqual(report["verdict"], "fail")
+                self.assertEqual(report["gate"]["result"], "fail")
+                self.assertIn("retrieval", report["gate"]["summary"])
+                self.assertEqual(lc.validate_record(report), [])
+
+    def test_different_oracles_cannot_turn_one_input_into_independent_wins(self):
+        inputs = load()
+        base = next(c for c in inputs["cases"] if c["id"] == "case_static-tie")
+        inputs["cases"] = [
+            dict(
+                copy.deepcopy(base),
+                id=f"case_tie-{n:06d}",
+                input_ref=f"synthetic:independent/{n}",
+            )
+            for n in range(19)
+        ] + [
+            dict(
+                copy.deepcopy(base),
+                id=f"case_win-{n:06d}",
+                input_ref="synthetic:one-dependent-input",
+                oracle={"kind": "contains_all", "needles": [f"needle-{n}"]},
+            )
+            for n in range(5)
+        ]
+        for variant in ("baseline", "candidate_outputs"):
+            inputs[variant]["outputs"] = {
+                case["id"]: {"text": "main"} for case in inputs["cases"]
+            }
+        for case in inputs["cases"][19:]:
+            inputs["candidate_outputs"]["outputs"][case["id"]] = {
+                "text": "needle-0 needle-1 needle-2 needle-3 needle-4"
+            }
+        with self.assertRaisesRegex(ev.EvalRefusal, "dependent.*input|input.*oracle"):
+            run(inputs)
+
+    def test_evaluator_revision_changes_derived_report_identity(self):
+        first = run()
+        with mock.patch.object(ev, "TOOL", "synthetic-evaluator:next-revision"):
+            second = run()
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertEqual(first["holdout_digest"], second["holdout_digest"])
+
+    def test_catastrophic_regex_is_bounded_by_an_outer_watchdog(self):
+        # The old code blocks in re.search. The test's own watchdog prevents that
+        # regression from wedging the suite; the repaired worker refuses sooner.
+        program = """
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('learning_eval', sys.argv[1])
+ev = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ev)
+try:
+    ev.grade({'id': 'case_bounded', 'oracle': {'kind': 'regex', 'pattern': '(a+)+$'}},
+             {'text': 'a' * 40 + '!'})
+except ev.EvalRefusal as exc:
+    print(str(exc))
+else:
+    raise SystemExit('regex did not refuse')
+"""
+        try:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-S",
+                    "-c",
+                    program,
+                    str(ROOT / "scripts/learning_eval.py"),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            self.fail("regex evaluation exceeded the independent 10-second watchdog")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("regex", result.stdout)
+        self.assertIn("timeout", result.stdout)
+
+    def test_regex_runner_failure_cannot_be_a_passing_grade(self):
+        with mock.patch(
+            "subprocess.run", side_effect=OSError("synthetic launch failure")
+        ):
+            with self.assertRaisesRegex(ev.EvalRefusal, "regex"):
+                ev.grade(
+                    {"id": "case_launch", "oracle": {"kind": "regex", "pattern": "x"}},
+                    {"text": "x"},
+                )
+
+    def test_regex_worker_protocol_failures_refuse_instead_of_grading(self):
+        for code, output in (
+            (1, '{"matched": true}'),
+            (0, "not json"),
+            (0, "[]"),
+            (0, '{"matched": 1}'),
+            (0, '{"matched": true, "extra": 1}'),
+            (0, '{"error": "synthetic worker failure"}'),
+        ):
+            completed = subprocess.CompletedProcess([], code, stdout=output)
+            with (
+                self.subTest(code=code, output=output),
+                mock.patch("subprocess.run", return_value=completed),
+            ):
+                with self.assertRaises(ev.EvalRefusal):
+                    ev.grade(
+                        {
+                            "id": "case_protocol",
+                            "oracle": {"kind": "regex", "pattern": "x"},
+                        },
+                        {"text": "x"},
+                    )
+
+    def test_regex_worker_preserves_false_grades(self):
+        passed, detail = ev.grade(
+            {"id": "case_no_match", "oracle": {"kind": "regex", "pattern": "^x$"}},
+            {"text": "y"},
+        )
+        self.assertFalse(passed)
+        self.assertEqual(detail, {})
+
+
+class ReviewEvidenceBindingTests(unittest.TestCase):
+    def test_changed_selected_oracle_changes_identity_not_holdout_membership(self):
+        inputs = load()
+        case = next(c for c in inputs["cases"] if c["id"] == "case_static-tie")
+        inputs["baseline"]["outputs"][case["id"]] = {"text": "alpha"}
+        inputs["candidate_outputs"]["outputs"][case["id"]] = {"text": "beta"}
+        case["oracle"] = {"kind": "contains_all", "needles": ["beta"]}
+        first = run(inputs)
+        case["oracle"]["needles"] = ["alpha"]
+        second = run(inputs)
+        self.assertNotEqual(first["results"]["wins"], second["results"]["wins"])
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertEqual(first["holdout_digest"], second["holdout_digest"])
+
+    def test_selected_input_and_category_are_bound_to_report_identity(self):
+        original = run()
+        for key, value in (
+            ("input_ref", "synthetic:replacement-input"),
+            ("category", "dynamic_state_tracking"),
+        ):
+            with self.subTest(field=key):
+                inputs = load()
+                case = next(c for c in inputs["cases"] if c["id"] == "case_static-tie")
+                case[key] = value
+                revised = run(inputs)
+                self.assertNotEqual(original["id"], revised["id"])
+                self.assertEqual(original["holdout_digest"], revised["holdout_digest"])
+
+    def test_output_roles_cannot_be_swapped_under_the_same_report_identity(self):
+        inputs = load()
+        first = run(inputs)
+        a, b = inputs["baseline"], inputs["candidate_outputs"]
+        a["outputs"], b["outputs"] = b["outputs"], a["outputs"]
+        second = run(inputs)
+        self.assertNotEqual(first["results"]["wins"], second["results"]["wins"])
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertEqual(first["holdout_digest"], second["holdout_digest"])
+
+    def test_case_order_and_recursive_json_key_order_do_not_change_identity(self):
+        def reordered(value):
+            if isinstance(value, dict):
+                return {key: reordered(value[key]) for key in reversed(value)}
+            if isinstance(value, list):
+                return [reordered(item) for item in value]
+            return value
+
+        first = run()
+        inputs = reordered(load())
+        inputs["cases"].reverse()
+        second = run(inputs)
+        self.assertEqual(first, second)
+
+    def clone_inputs(self):
+        inputs = load()
+        base = next(c for c in inputs["cases"] if c["id"] == "case_static-tie")
+        inputs["cases"] = [
+            dict(copy.deepcopy(base), id=f"case_clone-{i}") for i in range(2)
+        ]
+        for variant in ("baseline", "candidate_outputs"):
+            inputs[variant]["outputs"] = {
+                c["id"]: {"text": "main"} for c in inputs["cases"]
+            }
+        return inputs
+
+    def test_conflicting_clone_outputs_in_either_arm_refuse(self):
+        for variant in ("baseline", "candidate_outputs"):
+            for missing in (False, True):
+                with self.subTest(variant=variant, missing=missing):
+                    inputs = self.clone_inputs()
+                    outputs = inputs[variant]["outputs"]
+                    if missing:
+                        outputs.pop("case_clone-1")
+                    else:
+                        outputs["case_clone-1"] = {"text": "contradiction"}
+                    with self.assertRaisesRegex(
+                        ev.EvalRefusal, "conflicting.*evidence"
+                    ):
+                        run(inputs)
+
+    def test_contradictory_trials_refuse_regardless_of_favourable_id_order(self):
+        for wins_first in (False, True):
+            with self.subTest(wins_first=wins_first):
+                inputs = load()
+                base = next(c for c in inputs["cases"] if c["id"] == "case_static-tie")
+                cases = [
+                    dict(
+                        copy.deepcopy(base),
+                        id=f"case_tie-{i}",
+                        input_ref=f"s:tie/{i}",
+                    )
+                    for i in range(14)
+                ]
+                for i in range(6):
+                    cases.extend(
+                        dict(
+                            copy.deepcopy(base), id=f"case_{i}-{j}", input_ref=f"s:{i}"
+                        )
+                        for j in range(2)
+                    )
+                inputs["cases"] = cases
+                for variant in ("baseline", "candidate_outputs"):
+                    inputs[variant]["outputs"] = {
+                        c["id"]: {"text": "main"} for c in cases
+                    }
+                for i in range(6):
+                    for j in range(2):
+                        arm = (
+                            "baseline"
+                            if (j == 0) == wins_first
+                            else "candidate_outputs"
+                        )
+                        inputs[arm]["outputs"][f"case_{i}-{j}"] = {"text": "master"}
+                with self.assertRaisesRegex(ev.EvalRefusal, "conflicting.*evidence"):
+                    run(inputs)
+
+    def test_conflicting_clone_labels_in_either_arm_refuse(self):
+        for variant in ("baseline", "candidate"):
+            with self.subTest(variant=variant):
+                inputs = self.clone_inputs()
+                for case in inputs["cases"]:
+                    case["oracle"] = {"kind": "judge"}
+                labelled = [
+                    labels(arm, {c["id"]: "pass" for c in inputs["cases"]})
+                    for arm in ("baseline", "candidate")
+                ]
+                next(lab for lab in labelled if lab["variant"] == variant)["labels"][
+                    "case_clone-1"
+                ] = "fail"
+                with self.assertRaisesRegex(ev.EvalRefusal, "conflicting.*evidence"):
+                    run(inputs, labels=labelled)
+
+    def test_identical_judge_clones_still_count_once(self):
+        inputs = self.clone_inputs()
+        for case in inputs["cases"]:
+            case["oracle"] = {"kind": "judge"}
+        labelled = [
+            labels(arm, {c["id"]: "pass" for c in inputs["cases"]})
+            for arm in ("baseline", "candidate")
+        ]
+        report = run(inputs, labels=labelled)
+        self.assertEqual(report["cases"]["distinct_inputs"], 1)
+        self.assertEqual(report["cases"]["clones"], 1)
+        self.assertEqual(report["verdict"], "insufficient")
+
+
+class RetrievalCoverageTests(unittest.TestCase):
+    def winning_suite(self, ranked):
+        inputs = load()
+        original = next(c for c in inputs["cases"] if c["id"] == "case_static-tie")
+        inputs["cases"] = []
+        inputs["baseline"]["outputs"] = {}
+        inputs["candidate_outputs"]["outputs"] = {}
+        for index in range(20):
+            case = dict(
+                copy.deepcopy(original),
+                id=f"case_coverage-{index:06d}",
+                input_ref=f"synthetic:coverage/{index}",
+            )
+            if index < ranked:
+                case["oracle"] = {
+                    "kind": "ranked_recall",
+                    "expected_items": ["match"],
+                    "k": 1,
+                }
+                baseline, candidate = {"items": []}, {"items": ["match"]}
+            else:
+                baseline, candidate = {"text": "master"}, {"text": "main"}
+            inputs["cases"].append(case)
+            inputs["baseline"]["outputs"][case["id"]] = baseline
+            inputs["candidate_outputs"]["outputs"][case["id"]] = candidate
+        return inputs
+
+    def test_no_retrieval_measurements_cannot_certify_retrieval(self):
+        inputs = self.winning_suite(0)
+        report = run(inputs)
+        self.assertEqual(report["results"]["wins"], 20)
+        self.assertIsNone(report["results"]["retrieval"])
+        self.assertEqual((report["verdict"], report["gate"]), ("insufficient", None))
+        self.assertEqual(lc.validate_record(report), [])
+        self.assertEqual(run(inputs, gate="offline_eval")["verdict"], "pass")
+
+    def test_mixed_suite_retains_declared_overall_case_policy(self):
+        # This remains an overall paired gate plus measured non-regression, not
+        # a claim of retrieval-only statistical power (that policy is #513).
+        report = run(self.winning_suite(1))
+        self.assertEqual(report["cases"]["distinct_inputs"], 20)
+        self.assertEqual(report["results"]["retrieval"]["n"], 1)
+        self.assertEqual(report["verdict"], "pass")
+        self.assertEqual(lc.validate_record(report), [])
+
+    def test_all_retrieval_suite_can_certify_measured_improvement(self):
+        report = run(self.winning_suite(20))
+        self.assertEqual(report["results"]["retrieval"]["n"], 20)
+        self.assertEqual(report["gate"]["result"], "pass")
+        self.assertEqual(lc.validate_record(report), [])
 
 
 class SuiteTests(unittest.TestCase):
@@ -253,7 +625,8 @@ class RefusalTests(unittest.TestCase):
     def test_an_inconsistent_experience_ledger_refuses(self):
         inputs = load()
         moved = copy.deepcopy(inputs["experiences"][0])
-        moved.update(observed_at="2026-09-03T00:00:00Z", split_key="elsewhere")
+        moved["observed_at"] = "2026-09-03T00:00:00Z"
+        moved["split_key"] = "elsewhere"
         inputs["experiences"].append(moved)
         self.assertRefused("inconsistent", inputs)
 
@@ -472,7 +845,7 @@ class ReviewRegressionTests(unittest.TestCase):
         }
         for c in cases[19:]:
             inputs["baseline"]["outputs"][c["id"]] = {"text": "master"}
-        report = run(inputs)
+        report = run(inputs, gate="offline_eval")
         self.assertEqual(
             (report["cases"]["clones"], report["cases"]["distinct_inputs"]), (4, 20)
         )
