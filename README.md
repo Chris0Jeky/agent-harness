@@ -1,6 +1,5 @@
 # agent-harness
 
-<p align="center"><img src="https://raw.githubusercontent.com/Chris0Jeky/agent-harness/main/docs/assets/agent-harness-loop.svg" alt="agent-harness workflow, animated" width="100%"></p>
 
 The tier model, shared deny floor, and audit tools for the Codex and Claude repositories in this estate: what a repo is allowed to lose, what an argv line can prove, and whether the hook that claims to enforce it is actually wired.
 
@@ -154,7 +153,7 @@ python3 templates/hooks/smoke_test.py
 python3 -m unittest discover -s replay_v0/tests -v
 ```
 
-Ruff, Black, and `py_compile` use the explicit file list in [`.github/workflows/ci.yml`](.github/workflows/ci.yml). Add a new Python module to all three steps or CI will not lint it.
+Ruff, Black, and `py_compile` run through `scripts/python_checks.py` with the curated `scripts/python_check_files.json` inventory. Add new checked Python modules there once; Black also scans the whole replay package.
 
 ## Contracts that bite
 
