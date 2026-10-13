@@ -352,6 +352,51 @@ class MinimaTests(unittest.TestCase):
         self.assertEqual(lc.minima_errors(records[1]["gates"][0]), [])
 
 
+class SourceAccountTests(unittest.TestCase):
+    def test_optional_account_attributes_without_changing_identity_or_split(self):
+        original = copy.deepcopy(example("estate-experience.json")[0])
+        for account in ("a", "a" * 64, "synthetic-secondary", "é" * 64):
+            with self.subTest(account=account):
+                record = copy.deepcopy(original)
+                record["source"]["account"] = account
+                self.assertEqual(lc.validate_record(record), [])
+                self.assertEqual(
+                    record["id"],
+                    lc.experience_id(record["source"]["kind"], record["source"]["key"]),
+                )
+                self.assertEqual(
+                    lc.experience_split_key(record), lc.experience_split_key(original)
+                )
+
+    def test_legacy_source_remains_valid_and_unknown_fields_stay_closed(self):
+        record = copy.deepcopy(example("estate-experience.json")[0])
+        self.assertNotIn("account", record["source"])
+        self.assertEqual(lc.validate_record(record), [])
+        record["source"]["unknown_account_field"] = "synthetic"
+        self.assertTrue(
+            any("unexpected property" in e for e in lc.validate_record(record))
+        )
+
+    def test_account_rejects_empty_oversized_and_nonstring_values(self):
+        for value in ("", "a" * 65, None, False, 12, [], {}):
+            with self.subTest(value=value):
+                record = copy.deepcopy(example("estate-experience.json")[0])
+                record["source"]["account"] = value
+                self.assertTrue(any("account" in e for e in lc.validate_record(record)))
+
+    def test_later_account_attribution_does_not_create_another_experience(self):
+        original = copy.deepcopy(example("estate-experience.json")[0])
+        later = copy.deepcopy(original)
+        later["source"]["account"] = "synthetic-secondary"
+        later["observed_at"] = "2026-10-10T00:00:00Z"
+        folded, errors = lc.fold_experiences([original, later])
+        self.assertEqual(errors, [])
+        self.assertEqual(list(folded), [original["id"]])
+        self.assertEqual(
+            folded[original["id"]]["source"]["account"], "synthetic-secondary"
+        )
+
+
 class RecordRuleTests(unittest.TestCase):
     def assertRejected(self, record, fragment):
         errors = lc.validate_record(record)
