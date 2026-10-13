@@ -251,6 +251,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import importlib.util
 import inspect
@@ -259,6 +260,7 @@ import multiprocessing
 import os
 import re
 import sys
+import tempfile
 from collections import Counter
 from pathlib import Path
 from types import FunctionType, ModuleType
@@ -762,6 +764,35 @@ def build_corpus(
 CORPUS_CACHE_META_KEY = "replay_corpus_cache"
 
 
+@contextlib.contextmanager
+def atomic_text_write(dest: Path, *, newline: str | None = None) -> Iterator[Any]:
+    """Yield a handle to a sibling temp file, then replace `dest` on success.
+
+    The destination is replaced only after the caller's writes all succeed, so
+    a late failure keeps the prior good bytes. The handle is closed before the
+    replace (Windows cannot replace an open file) and the temp file is removed
+    on any failure. This is crash-atomic for the replace step only: it claims
+    no power-loss durability and no concurrent-writer exclusion.
+    """
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline=newline,
+            dir=dest.parent,
+            prefix=dest.name + ".",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            tmp_path = Path(handle.name)
+            yield handle
+        os.replace(tmp_path, dest)
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+
+
 def save_corpus(
     path: Path,
     corpus: dict[str, dict[str, int]],
@@ -779,7 +810,7 @@ def save_corpus(
     supported flag.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="\n") as handle:
+    with atomic_text_write(path, newline="\n") as handle:
         handle.write(
             json.dumps({CORPUS_CACHE_META_KEY: {"integrity": dict(integrity or {})}})
             + "\n"
@@ -2691,7 +2722,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stderr.write("no commands extracted; nothing to replay\n")
         return 1
     if args.corpus_cache:
-        save_corpus(args.corpus_cache, corpus, corpus_failures)
+        try:
+            save_corpus(args.corpus_cache, corpus, corpus_failures)
+        except OSError as error:
+            sys.stderr.write(
+                f"cannot write corpus cache {args.corpus_cache}: "
+                f"{type(error).__name__}: {error}\n"
+            )
+            return EXIT_TOOL_FAILURE
 
     unique_by_runtime = {name: 0 for name in RUNTIMES}
     invocations_by_runtime = {name: 0 for name in RUNTIMES}
@@ -2857,13 +2895,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     result["run"]["corpus_integrity"] = corpus_failures
     result["run"]["allow_errors"] = bool(args.allow_errors)
 
-    print_report(result, args.top, args.sample_width)
     if args.json_path:
-        args.json_path.parent.mkdir(parents=True, exist_ok=True)
-        args.json_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+        try:
+            payload = json.dumps(result, indent=2) + "\n"
+            args.json_path.parent.mkdir(parents=True, exist_ok=True)
+            with atomic_text_write(args.json_path) as handle:
+                handle.write(payload)
+        except OSError as error:
+            sys.stderr.write(
+                f"cannot write JSON report {args.json_path}: "
+                f"{type(error).__name__}: {error}\n"
+            )
+            return EXIT_TOOL_FAILURE
         sys.stderr.write(
             f"wrote {args.json_path} (contains untruncated command text)\n"
         )
+    print_report(result, args.top, args.sample_width)
     # Decided before anything is printed. Several of these hold at once on a
     # bad run, every banner prints regardless of which one wins, and each of
     # them names the exit code — so the code has to be known first or a banner

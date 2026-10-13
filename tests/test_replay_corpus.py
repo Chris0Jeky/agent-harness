@@ -2440,6 +2440,190 @@ class CorpusCacheProvenanceTests(EndToEndTestCase):
         self.assertTrue(recorded)
 
 
+class AtomicReplayArtifactTests(EndToEndTestCase):
+    """Output I/O must not destroy the prior good artifact.
+
+    `save_corpus` used to open the destination with "w", so a failure after
+    the ledger header left only the metadata prefix. The JSON report wrote
+    directly too, and both calls sat outside any error handling. The cases
+    below drive synthetic late-write and replace failures only; no real
+    transcript scan and no global policy execution.
+    """
+
+    def test_save_corpus_late_serialization_failure_keeps_prior_bytes_and_no_temp(self):
+        cache = self.dir / "cache.jsonl"
+        replay.save_corpus(
+            cache,
+            {"cmd-a": {"codex": 1, "claude": 0}},
+            {"unparsed-file-unreadable": 1},
+        )
+        before = cache.read_bytes()
+        original_dumps = replay.json.dumps
+        calls = []
+
+        def failing_dumps(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 2:
+                raise OSError("simulated late serialization failure")
+            return original_dumps(*args, **kwargs)
+
+        replay.json.dumps = failing_dumps
+        try:
+            with self.assertRaises(OSError):
+                replay.save_corpus(cache, {"cmd-b": {"codex": 2, "claude": 0}}, {})
+        finally:
+            replay.json.dumps = original_dumps
+        self.assertEqual(cache.read_bytes(), before)
+        self.assertEqual(
+            sorted(path.name for path in self.dir.iterdir()), ["cache.jsonl"]
+        )
+
+    def test_save_corpus_late_write_failure_keeps_prior_bytes_and_no_temp(self):
+        cache = self.dir / "cache.jsonl"
+        cache.write_bytes(b"prior fictional cache\n")
+        before = cache.read_bytes()
+        original_factory = replay.tempfile.NamedTemporaryFile
+
+        def failing_factory(*args, **kwargs):
+            handle = original_factory(*args, **kwargs)
+            original_write = handle.write
+            calls = 0
+
+            def failing_write(text):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("simulated disk full after ledger header")
+                return original_write(text)
+
+            handle.write = failing_write
+            return handle
+
+        replay.tempfile.NamedTemporaryFile = failing_factory
+        try:
+            with self.assertRaises(OSError):
+                replay.save_corpus(cache, {"echo fictional": {"codex": 1}}, {})
+        finally:
+            replay.tempfile.NamedTemporaryFile = original_factory
+        self.assertEqual(cache.read_bytes(), before)
+        self.assertEqual([path.name for path in self.dir.iterdir()], ["cache.jsonl"])
+
+    def test_save_corpus_round_trip_retains_ledger_and_rows(self):
+        cache = self.dir / "cache.jsonl"
+        corpus = {
+            "git status": {"codex": 1, "claude": 0},
+            "ls": {"codex": 0, "claude": 2},
+        }
+        ledger = {"unparsed-file-unreadable": 1}
+        replay.save_corpus(cache, corpus, ledger)
+        loaded, integrity, recorded = replay.load_corpus(cache)
+        self.assertEqual(loaded, corpus)
+        self.assertEqual(dict(integrity), ledger)
+        self.assertTrue(recorded)
+        rows = [
+            json.loads(line)
+            for line in cache.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(rows[0], {"replay_corpus_cache": {"integrity": ledger}})
+        self.assertEqual([row["command"] for row in rows[1:]], list(corpus.keys()))
+
+    def test_save_corpus_replace_failure_keeps_prior_bytes_and_no_temp(self):
+        cache = self.dir / "cache.jsonl"
+        replay.save_corpus(cache, {"a": {"codex": 1, "claude": 0}}, {})
+        before = cache.read_bytes()
+        original_replace = replay.os.replace
+
+        def failing_replace(*args, **kwargs):
+            raise OSError("simulated replace failure")
+
+        replay.os.replace = failing_replace
+        try:
+            with self.assertRaises(OSError):
+                replay.save_corpus(cache, {"b": {"codex": 1, "claude": 0}}, {})
+        finally:
+            replay.os.replace = original_replace
+        self.assertEqual(cache.read_bytes(), before)
+        self.assertEqual(
+            sorted(path.name for path in self.dir.iterdir()), ["cache.jsonl"]
+        )
+
+    def test_json_atomic_replace_failure_keeps_prior_bytes_and_no_temp(self):
+        dest = self.dir / "out.json"
+        prior = json.dumps({"ok": True}, indent=2) + "\n"
+        dest.write_text(prior, encoding="utf-8")
+        original_replace = replay.os.replace
+
+        def failing_replace(*args, **kwargs):
+            raise OSError("simulated report replace failure")
+
+        replay.os.replace = failing_replace
+        try:
+            with self.assertRaises(OSError):
+                with replay.atomic_text_write(dest) as handle:
+                    handle.write(json.dumps({"ok": False}, indent=2) + "\n")
+        finally:
+            replay.os.replace = original_replace
+        self.assertEqual(dest.read_text(encoding="utf-8"), prior)
+        self.assertEqual(sorted(path.name for path in self.dir.iterdir()), ["out.json"])
+
+    def test_cli_corpus_cache_io_failure_returns_three_without_traceback(self):
+        corpus = self.write_corpus("git status")
+        floor = self.write_dispatch("floor", "1.0.0", 'return "allow", ""')
+        cache = self.dir / "cache.jsonl"
+        cache.mkdir()
+        code, out, err = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(floor),
+            "--candidate",
+            str(floor),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--corpus-cache",
+            str(cache),
+            "--quiet",
+        )
+        self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
+        self.assertIn(str(cache), err)
+        self.assertIn("cannot write", err.lower())
+        self.assertNotIn("Traceback", err)
+        self.assertNotIn("Traceback", out)
+        self.assertFalse(any(".tmp" in path.name for path in self.dir.iterdir()))
+
+    def test_cli_json_report_io_failure_returns_three_without_success_stdout(self):
+        corpus = self.write_corpus("git status")
+        floor = self.write_dispatch("floor", "1.0.0", 'return "allow", ""')
+        report = self.dir / "out.json"
+        report.mkdir()
+        code, out, err = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(floor),
+            "--candidate",
+            str(floor),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--json",
+            str(report),
+            "--quiet",
+        )
+        self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
+        self.assertIn(str(report), err)
+        self.assertIn("cannot write", err.lower())
+        self.assertNotIn("Traceback", err)
+        self.assertNotIn("Traceback", out)
+        self.assertNotIn("block rate by tier", out)
+        self.assertNotIn("deny-floor corpus replay", out)
+        self.assertFalse(any(".tmp" in path.name for path in self.dir.iterdir()))
+
+
 class CorpusIntegrityTests(unittest.TestCase):
     """A shorter corpus that nobody was told about is a silent measurement bug."""
 
