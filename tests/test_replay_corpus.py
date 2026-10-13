@@ -2440,6 +2440,318 @@ class CorpusCacheProvenanceTests(EndToEndTestCase):
         self.assertTrue(recorded)
 
 
+class AtomicReplayArtifactTests(EndToEndTestCase):
+    """Output I/O must not destroy the prior good artifact.
+
+    `save_corpus` used to open the destination with "w", so a failure after
+    the ledger header left only the metadata prefix. The JSON report wrote
+    directly too, and both calls sat outside any error handling. The cases
+    below drive synthetic late-write and replace failures only; no real
+    transcript scan and no global policy execution.
+    """
+
+    def test_parent_alias_is_bound_without_relaxing_managed_writer(self):
+        writer = replay.load_dispatch(
+            "replay_parent_alias_writer", replay.REPO_ROOT / "harness.py"
+        )
+        real = self.dir / "real"
+        real.mkdir()
+        alias = self.dir / "alias"
+        if replay.os.name == "nt":
+            result = subprocess.run(
+                ["cmd", "/d", "/c", "mklink", "/J", str(alias), str(real)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+        else:
+            alias.symlink_to(real, target_is_directory=True)
+        try:
+            target = alias / "nested" / "cache.jsonl"
+            with self.assertRaisesRegex(writer.HarnessError, "path alias"):
+                writer.write_managed_codex_file(target, b"rejected")
+            replay.save_corpus(target, {"git status": {"codex": 1}}, {})
+            self.assertEqual(
+                replay.load_corpus(real / "nested" / "cache.jsonl")[0],
+                {"git status": {"codex": 1, "claude": 0}},
+            )
+            self.assertEqual(list((real / "nested").glob(".harness-agent-*")), [])
+        finally:
+            if replay.os.name == "nt":
+                alias.rmdir()
+            else:
+                alias.unlink()
+
+    @unittest.skipIf(replay.os.name == "nt", "file symlinks need Windows privilege")
+    def test_output_leaf_alias_is_still_refused_without_touching_its_target(self):
+        target = self.dir / "prior.json"
+        target.write_bytes(b"prior fictional bytes")
+        alias = self.dir / "output.json"
+        alias.symlink_to(target)
+        with self.assertRaisesRegex(OSError, "path alias"):
+            replay.write_artifact(alias, [b"replacement"])
+        self.assertEqual(target.read_bytes(), b"prior fictional bytes")
+        self.assertTrue(alias.is_symlink())
+        self.assertEqual(list(self.dir.glob(".harness-agent-*")), [])
+
+    def test_save_corpus_late_serialization_failure_keeps_prior_bytes_and_no_temp(self):
+        cache = self.dir / "cache.jsonl"
+        replay.save_corpus(
+            cache,
+            {"cmd-a": {"codex": 1, "claude": 0}},
+            {"unparsed-file-unreadable": 1},
+        )
+        before = cache.read_bytes()
+        original_dumps = replay.json.dumps
+        calls = []
+
+        def failing_dumps(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 2:
+                raise OSError("simulated late serialization failure")
+            return original_dumps(*args, **kwargs)
+
+        replay.json.dumps = failing_dumps
+        try:
+            with self.assertRaises(OSError):
+                replay.save_corpus(cache, {"cmd-b": {"codex": 2, "claude": 0}}, {})
+        finally:
+            replay.json.dumps = original_dumps
+        self.assertEqual(cache.read_bytes(), before)
+        self.assertEqual(
+            sorted(path.name for path in self.dir.iterdir()), ["cache.jsonl"]
+        )
+
+    def test_save_corpus_late_write_failure_keeps_prior_bytes_and_no_temp(self):
+        cache = self.dir / "cache.jsonl"
+        cache.write_bytes(b"prior fictional cache\n")
+        before = cache.read_bytes()
+        original_factory = replay.os.fdopen
+
+        def failing_factory(*args, **kwargs):
+            handle = original_factory(*args, **kwargs)
+            original_write = handle.write
+            calls = 0
+
+            def failing_write(text):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("simulated disk full after ledger header")
+                return original_write(text)
+
+            handle.write = failing_write
+            return handle
+
+        replay.os.fdopen = failing_factory
+        try:
+            with self.assertRaises(OSError):
+                replay.save_corpus(cache, {"echo fictional": {"codex": 1}}, {})
+        finally:
+            replay.os.fdopen = original_factory
+        self.assertEqual(cache.read_bytes(), before)
+        self.assertEqual([path.name for path in self.dir.iterdir()], ["cache.jsonl"])
+
+    def test_save_corpus_round_trip_retains_ledger_and_rows(self):
+        cache = self.dir / "cache.jsonl"
+        corpus = {
+            "git status": {"codex": 1, "claude": 0},
+            "ls": {"codex": 0, "claude": 2},
+        }
+        ledger = {"unparsed-file-unreadable": 1}
+        replay.save_corpus(cache, corpus, ledger)
+        loaded, integrity, recorded = replay.load_corpus(cache)
+        self.assertEqual(loaded, corpus)
+        self.assertEqual(dict(integrity), ledger)
+        self.assertTrue(recorded)
+        rows = [
+            json.loads(line)
+            for line in cache.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(rows[0], {"replay_corpus_cache": {"integrity": ledger}})
+        self.assertEqual([row["command"] for row in rows[1:]], list(corpus.keys()))
+
+    def test_streamed_output_refuses_changed_published_bytes(self):
+        dest = self.dir / "out.json"
+        original_replace = replay.os.replace
+
+        def changed_replace(source, target):
+            original_replace(source, target)
+            Path(target).write_bytes(b"changed by a later writer")
+
+        replay.os.replace = changed_replace
+        try:
+            with self.assertRaisesRegex(OSError, "changed during publication"):
+                replay.write_artifact(dest, iter([b"expected fictional bytes"]))
+        finally:
+            replay.os.replace = original_replace
+
+    @unittest.skipUnless(
+        replay.os.name == "nt", "NTFS security descriptors are Windows-only"
+    )
+    def test_windows_protected_output_and_staging_keep_destination_dacl(self):
+        from tests.test_managed_agent_atomic import (
+            ace_body,
+            current_user_sid,
+            file_dacl_sddl,
+            set_dacl,
+        )
+
+        shared = self.dir / "shared"
+        shared.mkdir()
+        user = current_user_sid()
+        set_dacl(shared, f"D:(A;OICI;FA;;;{user})(A;OICI;FR;;;WD)", True)
+        dest = shared / "cache.jsonl"
+        dest.write_bytes(b"prior fictional bytes")
+        set_dacl(dest, f"D:(A;;FA;;;{user})", True)
+        before = ace_body(file_dacl_sddl(dest))
+
+        def chunks():
+            staging = list(shared.glob(".harness-agent-*"))
+            self.assertEqual(len(staging), 1)
+            self.assertEqual(ace_body(file_dacl_sddl(staging[0])), before)
+            self.assertTrue(file_dacl_sddl(staging[0]).startswith("D:P"))
+            yield b"new fictional bytes"
+
+        replay.write_artifact(dest, chunks())
+        self.assertEqual(dest.read_bytes(), b"new fictional bytes")
+        self.assertEqual(ace_body(file_dacl_sddl(dest)), before)
+        self.assertTrue(file_dacl_sddl(dest).startswith("D:P"))
+        self.assertEqual(list(shared.glob(".harness-agent-*")), [])
+
+    @unittest.skipUnless(
+        replay.os.name == "nt", "NTFS security descriptors are Windows-only"
+    )
+    def test_windows_new_output_is_owner_only_before_any_bytes(self):
+        from tests.test_managed_agent_atomic import (
+            current_user_sid,
+            file_dacl_sddl,
+            set_dacl,
+        )
+
+        shared = self.dir / "shared"
+        shared.mkdir()
+        user = current_user_sid()
+        set_dacl(shared, f"D:(A;OICI;FA;;;{user})(A;OICI;FR;;;WD)", True)
+        dest = shared / "new-cache.jsonl"
+
+        def chunks():
+            staging = list(shared.glob(".harness-agent-*"))
+            self.assertEqual(len(staging), 1)
+            descriptor = file_dacl_sddl(staging[0])
+            self.assertNotIn(";WD)", descriptor)
+            self.assertTrue(descriptor.startswith("D:P"))
+            yield b"fictional bytes"
+
+        replay.write_artifact(dest, chunks())
+        self.assertNotIn(";WD)", file_dacl_sddl(dest))
+
+    @unittest.skipIf(replay.os.name == "nt", "POSIX mode bits")
+    def test_posix_raw_output_is_owner_only(self):
+        dest = self.dir / "cache.jsonl"
+        dest.write_bytes(b"prior fictional bytes")
+        dest.chmod(0o644)
+        replay.write_artifact(dest, iter([b"new fictional bytes"]))
+        self.assertEqual(dest.stat().st_mode & 0o777, 0o600)
+
+    def test_save_corpus_replace_failure_keeps_prior_bytes_and_no_temp(self):
+        cache = self.dir / "cache.jsonl"
+        replay.save_corpus(cache, {"a": {"codex": 1, "claude": 0}}, {})
+        before = cache.read_bytes()
+        original_replace = replay.os.replace
+
+        def failing_replace(*args, **kwargs):
+            raise OSError("simulated replace failure")
+
+        replay.os.replace = failing_replace
+        try:
+            with self.assertRaises(OSError):
+                replay.save_corpus(cache, {"b": {"codex": 1, "claude": 0}}, {})
+        finally:
+            replay.os.replace = original_replace
+        self.assertEqual(cache.read_bytes(), before)
+        self.assertEqual(
+            sorted(path.name for path in self.dir.iterdir()), ["cache.jsonl"]
+        )
+
+    def test_json_atomic_replace_failure_keeps_prior_bytes_and_no_temp(self):
+        dest = self.dir / "out.json"
+        prior = json.dumps({"ok": True}, indent=2) + "\n"
+        dest.write_text(prior, encoding="utf-8")
+        original_replace = replay.os.replace
+
+        def failing_replace(*args, **kwargs):
+            raise OSError("simulated report replace failure")
+
+        replay.os.replace = failing_replace
+        try:
+            with self.assertRaises(OSError):
+                replay.write_artifact(
+                    dest, [(json.dumps({"ok": False}, indent=2) + "\n").encode("utf-8")]
+                )
+        finally:
+            replay.os.replace = original_replace
+        self.assertEqual(dest.read_text(encoding="utf-8"), prior)
+        self.assertEqual(sorted(path.name for path in self.dir.iterdir()), ["out.json"])
+
+    def test_cli_corpus_cache_io_failure_returns_three_without_traceback(self):
+        corpus = self.write_corpus("git status")
+        floor = self.write_dispatch("floor", "1.0.0", 'return "allow", ""')
+        cache = self.dir / "cache.jsonl"
+        cache.mkdir()
+        code, out, err = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(floor),
+            "--candidate",
+            str(floor),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--corpus-cache",
+            str(cache),
+            "--quiet",
+        )
+        self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
+        self.assertIn(str(cache), err)
+        self.assertIn("cannot write", err.lower())
+        self.assertNotIn("Traceback", err)
+        self.assertNotIn("Traceback", out)
+        self.assertFalse(any(".tmp" in path.name for path in self.dir.iterdir()))
+
+    def test_cli_json_report_io_failure_returns_three_without_success_stdout(self):
+        corpus = self.write_corpus("git status")
+        floor = self.write_dispatch("floor", "1.0.0", 'return "allow", ""')
+        report = self.dir / "out.json"
+        report.mkdir()
+        code, out, err = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(floor),
+            "--candidate",
+            str(floor),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--json",
+            str(report),
+            "--quiet",
+        )
+        self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
+        self.assertIn(str(report), err)
+        self.assertIn("cannot write", err.lower())
+        self.assertNotIn("Traceback", err)
+        self.assertNotIn("Traceback", out)
+        self.assertNotIn("block rate by tier", out)
+        self.assertNotIn("deny-floor corpus replay", out)
+        self.assertFalse(any(".tmp" in path.name for path in self.dir.iterdir()))
+
+
 class CorpusIntegrityTests(unittest.TestCase):
     """A shorter corpus that nobody was told about is a silent measurement bug."""
 

@@ -259,10 +259,11 @@ import multiprocessing
 import os
 import re
 import sys
+import stat
 from collections import Counter
 from pathlib import Path
 from types import FunctionType, ModuleType
-from typing import Any, Callable, Iterator, Sequence
+from typing import Any, Callable, Iterable, Iterator, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DISPATCH = REPO_ROOT / "templates" / "hooks" / "dispatch.py"
@@ -762,6 +763,25 @@ def build_corpus(
 CORPUS_CACHE_META_KEY = "replay_corpus_cache"
 
 
+def write_artifact(path: Path, chunks: Iterable[bytes]) -> None:
+    """Use the harness's permission-preserving writer without buffering a corpus."""
+    try:
+        # Ordinary output parents may alias (/var on macOS); keep the leaf un-followed.
+        path = path.parent.resolve() / path.name
+        writer = load_dispatch("replay_artifact_writer", REPO_ROOT / "harness.py")
+        mode = (
+            stat.S_IMODE(path.stat().st_mode)
+            if os.name == "nt" and path.exists()
+            else 0o600
+        )
+        try:
+            writer.write_managed_codex_file(path, chunks, mode)
+        except writer.HarnessError as error:
+            raise OSError(str(error)) from error
+    except (ReplayHarnessError, RuntimeError) as error:
+        raise OSError(str(error)) from error
+
+
 def save_corpus(
     path: Path,
     corpus: dict[str, dict[str, int]],
@@ -778,16 +798,18 @@ def save_corpus(
     the incompleteness laundered out of existence by a round trip through a
     supported flag.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="\n") as handle:
-        handle.write(
+
+    def chunks():
+        yield (
             json.dumps({CORPUS_CACHE_META_KEY: {"integrity": dict(integrity or {})}})
             + "\n"
-        )
+        ).encode("utf-8")
         for command, counts in corpus.items():
             row = {"command": command}
             row.update(counts)
-            handle.write(json.dumps(row) + "\n")
+            yield (json.dumps(row) + "\n").encode("utf-8")
+
+    write_artifact(path, chunks())
 
 
 def load_corpus(path: Path) -> tuple[dict[str, dict[str, int]], Counter[str], bool]:
@@ -2691,7 +2713,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stderr.write("no commands extracted; nothing to replay\n")
         return 1
     if args.corpus_cache:
-        save_corpus(args.corpus_cache, corpus, corpus_failures)
+        try:
+            save_corpus(args.corpus_cache, corpus, corpus_failures)
+        except OSError as error:
+            sys.stderr.write(
+                f"cannot write corpus cache {args.corpus_cache}: "
+                f"{type(error).__name__}: {error}\n"
+            )
+            return EXIT_TOOL_FAILURE
 
     unique_by_runtime = {name: 0 for name in RUNTIMES}
     invocations_by_runtime = {name: 0 for name in RUNTIMES}
@@ -2857,13 +2886,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     result["run"]["corpus_integrity"] = corpus_failures
     result["run"]["allow_errors"] = bool(args.allow_errors)
 
-    print_report(result, args.top, args.sample_width)
     if args.json_path:
-        args.json_path.parent.mkdir(parents=True, exist_ok=True)
-        args.json_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+        try:
+            payload = json.dumps(result, indent=2) + "\n"
+            write_artifact(
+                args.json_path, [payload.replace("\n", os.linesep).encode("utf-8")]
+            )
+        except OSError as error:
+            sys.stderr.write(
+                f"cannot write JSON report {args.json_path}: "
+                f"{type(error).__name__}: {error}\n"
+            )
+            return EXIT_TOOL_FAILURE
         sys.stderr.write(
             f"wrote {args.json_path} (contains untruncated command text)\n"
         )
+    print_report(result, args.top, args.sample_width)
     # Decided before anything is printed. Several of these hold at once on a
     # bad run, every banner prints regardless of which one wins, and each of
     # them names the exit code — so the code has to be known first or a banner
