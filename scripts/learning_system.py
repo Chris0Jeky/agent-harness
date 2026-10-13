@@ -28,7 +28,7 @@ _SPEC = importlib.util.spec_from_file_location(
 contracts = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(contracts)
 
-TOOL = "agent-harness:scripts/learning_system.py@1"
+TOOL = "agent-harness:scripts/learning_system.py@2"
 DEFAULT_POLICY = {
     "min_runs": 20,
     "min_matured": 10,
@@ -157,6 +157,17 @@ def compare(
         raise SystemRefusal(
             f"the candidate runs as gen:{named}: pass that genome so its training runs stay out"
         )
+    candidate_at = contracts.parse_time(candidate.get("at"))
+    if candidate_at is None:
+        raise SystemRefusal("the candidate's at is not a contract timestamp")
+    if genome is None:
+        cutoff = candidate_at
+    else:
+        genome_at = contracts.parse_time(genome.get("at"))
+        if genome_at is None:
+            raise SystemRefusal("the genome's at is not a contract timestamp")
+        cutoff = candidate_at if candidate_at >= genome_at else genome_at
+    cutoff_id = cutoff.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
     arms = {"baseline": [], "candidate": []}
     excluded = 0
     for record in by_id.values():
@@ -167,6 +178,15 @@ def compare(
             continue
         if record["id"] in training:
             excluded += 1
+            continue
+        run_at = contracts.parse_time(record.get("at"))
+        observed_at = contracts.parse_time(record.get("observed_at"))
+        if (
+            run_at is None
+            or observed_at is None
+            or run_at < cutoff
+            or observed_at < cutoff
+        ):
             continue
         arms[side].append(record)
     stats = {side: arm(runs) for side, runs in arms.items()}
@@ -189,6 +209,8 @@ def compare(
     at = at or dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     basis = json.dumps(
         [
+            TOOL,
+            cutoff_id,
             candidate["id"],
             baseline_variant,
             candidate_variant,
