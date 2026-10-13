@@ -1064,9 +1064,13 @@ test and audit seam, not authority.
 **Hold-out.** An experience's split is derived, never stored: `split_of(split_key)`, a salted
 sha256 (`estate-experience/v1/split`) with a 20% hold-out, where `split_key` defaults to
 `source.kind|source.key`; producers set it to group runs that must land on one side (one PR, one
-finding cluster, one correction key). The first observation fixes an experience's `source` and
-split key: `fold_experiences` refuses a later observation that changes either, so a run never
-moves across the split. Offline evaluation and replay gates carry `holdout_digest` (sha256 of
+finding cluster, one correction key). The first observation fixes an experience's `source.kind`,
+`source.key` and split key: `fold_experiences` refuses later changes to these identity fields, so
+an existing run never moves across the split. Optional `source.account` is producer-supplied
+attribution (a 1-64 character string), not identity or authority; it may be added or corrected on
+later observations without changing the experience ID or default split key. Outcome events
+retain only source kind/key in `run`; consumers join `experience` for account attribution.
+Offline evaluation and replay gates carry `holdout_digest` (sha256 of
 the evaluated case ids, sorted and newline-joined), `training_excluded: true` and `anchors` (the
 experiences the evaluated cases came from), which the fold checks against the candidate's
 evidence. The replay evaluator computes all three; excluding a genome's `training_evidence` and

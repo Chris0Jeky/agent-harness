@@ -1647,7 +1647,7 @@ def fold_experiences(records):
     """Latest observation per experience id, and the contract errors across them.
 
     An experience is re-observed as its outcome advances, but its identity
-    (source), its split key and its comparison arm (variant) are fixed by its
+    (source.kind/key), its split key and its comparison arm (variant) are fixed by its
     first observation: a later observation that changes one would move a run
     across the hold-out or out of its arm.
     """
@@ -1669,7 +1669,10 @@ def fold_experiences(records):
             origin = first[ident]
             if experience_split_key(origin) != experience_split_key(record):
                 problems.append("split_key differs from the first observation")
-            if origin["source"] != record["source"]:
+            if any(
+                origin["source"][key] != record["source"][key]
+                for key in ("kind", "key")
+            ):
                 problems.append("source differs from the first observation")
             if origin.get("variant") != record.get("variant"):
                 problems.append("variant differs from the first observation")

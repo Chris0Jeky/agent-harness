@@ -25,12 +25,10 @@ py -3 -m pip install -r requirements-dev.txt   # ruff + black, pinned
 # Full verification (same gates as CI, which runs on Windows/macOS/Linux, Python 3.11)
 py -3 -m unittest discover -s tests -p "test_*.py" -v
 py -3 templates\hooks\smoke_test.py            # deny-floor bypass matrix
-# ruff/black/py_compile run over an EXPLICIT file list that lives in ci.yml and grows with
-# every new module. Read it from there rather than from a copy here that goes stale:
-$files = (Select-String -Path .github\workflows\ci.yml -Pattern '[A-Za-z0-9_/-]+\.py' -AllMatches).Matches.Value | Sort-Object -Unique
-py -3 -m ruff check $files
-py -3 -m black --check $files
-py -3 -m black --check replay_v0                # CI's second Black step covers the whole package
+# Use CI's shared curated inventory and preserve Black's whole-replay scan.
+py -3 scripts\python_checks.py ruff
+py -3 scripts\python_checks.py black
+py -3 scripts\python_checks.py compile
 
 # Single test
 py -3 -m unittest tests.test_harness.<TestClass>.<test_method> -v
@@ -44,9 +42,8 @@ py -3 harness.py worktree-lease --repo <linked-worktree> --action <status|acquir
 py -3 harness.py worktrees --repo <repo> [--refresh] [--claimant <id>] [--apply] [--json]
 ```
 
-`.github/workflows/ci.yml` is the single source of that file list — it had drifted to 19 entries
-while this file still named 7. New Python files must be added to all three CI steps (ruff, black,
-py_compile) or they are silently unlinted.
+`scripts/python_check_files.json` is the single source of that file list. Add new checked Python
+files there once; the CI launcher applies the same inventory to Ruff, Black and compilation.
 
 ## Architecture
 

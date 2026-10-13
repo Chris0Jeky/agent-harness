@@ -93,6 +93,48 @@ class OutcomeTests(unittest.TestCase):
         self.assertEqual(events[0]["run"]["key"], "run-1")
         self.assertEqual(events[0]["producer"]["model"], "synthetic-model")
 
+    def test_account_attribution_does_not_expand_the_outcome_run_contract(self):
+        original = experience(immediate="merged", matured="clean")
+        attributed = copy.deepcopy(original)
+        attributed["source"]["account"] = "synthetic-secondary"
+        expected = self.project([original])
+        actual = self.project([attributed])
+        self.assertEqual(actual, expected)
+        self.assertEqual(attributed["source"]["account"], "synthetic-secondary")
+
+    def test_account_only_observation_keeps_versions_and_outcome_changes_valid(self):
+        records = history()
+        account_only = copy.deepcopy(records[0])
+        account_only["source"]["account"] = "synthetic-secondary"
+        account_only["observed_at"] = "2026-09-02T00:00:00Z"
+        attributed = [records[0], account_only]
+        for record in records[1:]:
+            record = copy.deepcopy(record)
+            record["source"]["account"] = "synthetic-secondary"
+            attributed.append(record)
+        self.assertEqual(self.project(attributed), self.project(records))
+
+    def test_attributed_project_output_is_accepted_by_posterior_cli(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "experiences.json"
+            target = Path(directory) / "events.jsonl"
+            record = experience(immediate="merged", matured="clean")
+            record["source"]["account"] = "synthetic-secondary"
+            source.write_text(json.dumps([record]), encoding="utf-8")
+            projected = self.cli("project", str(source), "--out", str(target))
+            self.assertEqual(projected.returncode, 0, projected.stderr)
+            result = self.cli(
+                "posterior",
+                "--events",
+                str(target),
+                "--repo",
+                "example",
+                "--recipe",
+                "test-gaps",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), {"alpha": 2, "beta": 1})
+
     def test_late_regression_revises_all_consumers_and_cursor(self):
         records = history()
         other = experience("other-run")

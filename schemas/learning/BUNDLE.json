@@ -1,6 +1,6 @@
 {
   "schema": "learning-contract-bundle/v1",
-  "version": 2,
+  "version": 3,
   "files": [
     {
       "path": "schemas/learning/candidate-genome.schema.json",
@@ -16,7 +16,7 @@
     },
     {
       "path": "schemas/learning/estate-experience.schema.json",
-      "sha256": "5b49b19b62435d6d325e31a0a3e7a331e0e66d74bd2767d85f63a054f83faf76"
+      "sha256": "b414b99984f44a0163e6ca49c53e4572d6fcd4f1b37d54f382b1dfc8999c91b5"
     },
     {
       "path": "schemas/learning/eval-case.schema.json",
@@ -76,7 +76,7 @@
     },
     {
       "path": "scripts/learning_contracts.py",
-      "sha256": "ef2c5e098922ede9d420b9a7094fd52a65e633f5e289de54f0e6ef7347e6a717"
+      "sha256": "ce9fce2f0fa0588707ca84de47da39c61cf94bab826baa340366d8992ceab299"
     }
   ],
   "record_schemas": [
@@ -95,5 +95,5 @@
     "promotion-record/v1",
     "system-run/v1"
   ],
-  "digest": "65cff0dfd7ad3dfcaeec4da20e8e503e96e59c3df00aa4b3b494d86c2b6c6cdb"
+  "digest": "e358d86bb68a102bf55d9bbdfa6a066d82be34e0d88b9ffd6835974ff4144190"
 }
