@@ -1,6 +1,6 @@
 {
   "schema": "learning-compat-fixtures/v1",
-  "version": 2,
+  "version": 3,
   "files": [
     {
       "path": "schemas/learning/compat/README.md",
@@ -16,7 +16,7 @@
     },
     {
       "path": "schemas/learning/compat/accept/estate-experience-v1.jsonl",
-      "sha256": "5a39b2e9c2456a2bcd89de7ce223de6e650a9fe5f765b8c38832cda9025757cd"
+      "sha256": "e89c9a75089b36772324d58c0053de9724a2d4de868de39145788a2f8a0bcba5"
     },
     {
       "path": "schemas/learning/compat/accept/eval-case-v1.jsonl",
@@ -91,9 +91,13 @@
       "sha256": "7b2d8a387529529f642aa32dae3a16cd71a9256e8f1e137ad54506700356e8ed"
     },
     {
+      "path": "schemas/learning/compat/reject/source-account-too-long.json",
+      "sha256": "490617fb09e0dada1236bb58fa09f9e2db7d9d9bbc200268cf7fce338d4965ef"
+    },
+    {
       "path": "schemas/learning/compat/reject/would-apply-wrong-hash.json",
       "sha256": "39d2944009619400ed8a602eb917dd5a0c33f7ca3f195402a2e1d2279daf2d8b"
     }
   ],
-  "digest": "5f0052ce6048188bc1eb1a7b0c9f4b693953cd93a978530495c9d9f9549bd35e"
+  "digest": "2f9a1e9a068327e2e649e43cb98b1af1b7dd65ba2be370684dd91e553eaf6b6e"
 }
