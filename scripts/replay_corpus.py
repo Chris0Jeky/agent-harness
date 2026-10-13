@@ -251,7 +251,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import contextlib
 import hashlib
 import importlib.util
 import inspect
@@ -260,11 +259,11 @@ import multiprocessing
 import os
 import re
 import sys
-import tempfile
+import stat
 from collections import Counter
 from pathlib import Path
 from types import FunctionType, ModuleType
-from typing import Any, Callable, Iterator, Sequence
+from typing import Any, Callable, Iterable, Iterator, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DISPATCH = REPO_ROOT / "templates" / "hooks" / "dispatch.py"
@@ -764,33 +763,21 @@ def build_corpus(
 CORPUS_CACHE_META_KEY = "replay_corpus_cache"
 
 
-@contextlib.contextmanager
-def atomic_text_write(dest: Path, *, newline: str | None = None) -> Iterator[Any]:
-    """Yield a handle to a sibling temp file, then replace `dest` on success.
-
-    The destination is replaced only after the caller's writes all succeed, so
-    a late failure keeps the prior good bytes. The handle is closed before the
-    replace (Windows cannot replace an open file) and the temp file is removed
-    on any failure. This is crash-atomic for the replace step only: it claims
-    no power-loss durability and no concurrent-writer exclusion.
-    """
-    tmp_path = None
+def write_artifact(path: Path, chunks: Iterable[bytes]) -> None:
+    """Use the harness's permission-preserving writer without buffering a corpus."""
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            newline=newline,
-            dir=dest.parent,
-            prefix=dest.name + ".",
-            suffix=".tmp",
-            delete=False,
-        ) as handle:
-            tmp_path = Path(handle.name)
-            yield handle
-        os.replace(tmp_path, dest)
-    finally:
-        if tmp_path is not None:
-            tmp_path.unlink(missing_ok=True)
+        writer = load_dispatch("replay_artifact_writer", REPO_ROOT / "harness.py")
+        mode = (
+            stat.S_IMODE(path.stat().st_mode)
+            if os.name == "nt" and path.exists()
+            else 0o600
+        )
+        try:
+            writer.write_managed_codex_file(path, chunks, mode)
+        except writer.HarnessError as error:
+            raise OSError(str(error)) from error
+    except ReplayHarnessError as error:
+        raise OSError(str(error)) from error
 
 
 def save_corpus(
@@ -809,16 +796,18 @@ def save_corpus(
     the incompleteness laundered out of existence by a round trip through a
     supported flag.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with atomic_text_write(path, newline="\n") as handle:
-        handle.write(
+
+    def chunks():
+        yield (
             json.dumps({CORPUS_CACHE_META_KEY: {"integrity": dict(integrity or {})}})
             + "\n"
-        )
+        ).encode("utf-8")
         for command, counts in corpus.items():
             row = {"command": command}
             row.update(counts)
-            handle.write(json.dumps(row) + "\n")
+            yield (json.dumps(row) + "\n").encode("utf-8")
+
+    write_artifact(path, chunks())
 
 
 def load_corpus(path: Path) -> tuple[dict[str, dict[str, int]], Counter[str], bool]:
@@ -2898,9 +2887,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.json_path:
         try:
             payload = json.dumps(result, indent=2) + "\n"
-            args.json_path.parent.mkdir(parents=True, exist_ok=True)
-            with atomic_text_write(args.json_path) as handle:
-                handle.write(payload)
+            write_artifact(
+                args.json_path, [payload.replace("\n", os.linesep).encode("utf-8")]
+            )
         except OSError as error:
             sys.stderr.write(
                 f"cannot write JSON report {args.json_path}: "

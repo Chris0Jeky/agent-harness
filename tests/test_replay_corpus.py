@@ -2482,7 +2482,7 @@ class AtomicReplayArtifactTests(EndToEndTestCase):
         cache = self.dir / "cache.jsonl"
         cache.write_bytes(b"prior fictional cache\n")
         before = cache.read_bytes()
-        original_factory = replay.tempfile.NamedTemporaryFile
+        original_factory = replay.os.fdopen
 
         def failing_factory(*args, **kwargs):
             handle = original_factory(*args, **kwargs)
@@ -2499,12 +2499,12 @@ class AtomicReplayArtifactTests(EndToEndTestCase):
             handle.write = failing_write
             return handle
 
-        replay.tempfile.NamedTemporaryFile = failing_factory
+        replay.os.fdopen = failing_factory
         try:
             with self.assertRaises(OSError):
                 replay.save_corpus(cache, {"echo fictional": {"codex": 1}}, {})
         finally:
-            replay.tempfile.NamedTemporaryFile = original_factory
+            replay.os.fdopen = original_factory
         self.assertEqual(cache.read_bytes(), before)
         self.assertEqual([path.name for path in self.dir.iterdir()], ["cache.jsonl"])
 
@@ -2527,6 +2527,89 @@ class AtomicReplayArtifactTests(EndToEndTestCase):
         ]
         self.assertEqual(rows[0], {"replay_corpus_cache": {"integrity": ledger}})
         self.assertEqual([row["command"] for row in rows[1:]], list(corpus.keys()))
+
+    def test_streamed_output_refuses_changed_published_bytes(self):
+        dest = self.dir / "out.json"
+        original_replace = replay.os.replace
+
+        def changed_replace(source, target):
+            original_replace(source, target)
+            Path(target).write_bytes(b"changed by a later writer")
+
+        replay.os.replace = changed_replace
+        try:
+            with self.assertRaisesRegex(OSError, "changed during publication"):
+                replay.write_artifact(dest, iter([b"expected fictional bytes"]))
+        finally:
+            replay.os.replace = original_replace
+
+    @unittest.skipUnless(
+        replay.os.name == "nt", "NTFS security descriptors are Windows-only"
+    )
+    def test_windows_protected_output_and_staging_keep_destination_dacl(self):
+        from tests.test_managed_agent_atomic import (
+            ace_body,
+            current_user_sid,
+            file_dacl_sddl,
+            set_dacl,
+        )
+
+        shared = self.dir / "shared"
+        shared.mkdir()
+        user = current_user_sid()
+        set_dacl(shared, f"D:(A;OICI;FA;;;{user})(A;OICI;FR;;;WD)", True)
+        dest = shared / "cache.jsonl"
+        dest.write_bytes(b"prior fictional bytes")
+        set_dacl(dest, f"D:(A;;FA;;;{user})", True)
+        before = ace_body(file_dacl_sddl(dest))
+
+        def chunks():
+            staging = list(shared.glob(".harness-agent-*"))
+            self.assertEqual(len(staging), 1)
+            self.assertEqual(ace_body(file_dacl_sddl(staging[0])), before)
+            self.assertTrue(file_dacl_sddl(staging[0]).startswith("D:P"))
+            yield b"new fictional bytes"
+
+        replay.write_artifact(dest, chunks())
+        self.assertEqual(dest.read_bytes(), b"new fictional bytes")
+        self.assertEqual(ace_body(file_dacl_sddl(dest)), before)
+        self.assertTrue(file_dacl_sddl(dest).startswith("D:P"))
+        self.assertEqual(list(shared.glob(".harness-agent-*")), [])
+
+    @unittest.skipUnless(
+        replay.os.name == "nt", "NTFS security descriptors are Windows-only"
+    )
+    def test_windows_new_output_is_owner_only_before_any_bytes(self):
+        from tests.test_managed_agent_atomic import (
+            current_user_sid,
+            file_dacl_sddl,
+            set_dacl,
+        )
+
+        shared = self.dir / "shared"
+        shared.mkdir()
+        user = current_user_sid()
+        set_dacl(shared, f"D:(A;OICI;FA;;;{user})(A;OICI;FR;;;WD)", True)
+        dest = shared / "new-cache.jsonl"
+
+        def chunks():
+            staging = list(shared.glob(".harness-agent-*"))
+            self.assertEqual(len(staging), 1)
+            descriptor = file_dacl_sddl(staging[0])
+            self.assertNotIn(";WD)", descriptor)
+            self.assertTrue(descriptor.startswith("D:P"))
+            yield b"fictional bytes"
+
+        replay.write_artifact(dest, chunks())
+        self.assertNotIn(";WD)", file_dacl_sddl(dest))
+
+    @unittest.skipIf(replay.os.name == "nt", "POSIX mode bits")
+    def test_posix_raw_output_is_owner_only(self):
+        dest = self.dir / "cache.jsonl"
+        dest.write_bytes(b"prior fictional bytes")
+        dest.chmod(0o644)
+        replay.write_artifact(dest, iter([b"new fictional bytes"]))
+        self.assertEqual(dest.stat().st_mode & 0o777, 0o600)
 
     def test_save_corpus_replace_failure_keeps_prior_bytes_and_no_temp(self):
         cache = self.dir / "cache.jsonl"
@@ -2560,8 +2643,9 @@ class AtomicReplayArtifactTests(EndToEndTestCase):
         replay.os.replace = failing_replace
         try:
             with self.assertRaises(OSError):
-                with replay.atomic_text_write(dest) as handle:
-                    handle.write(json.dumps({"ok": False}, indent=2) + "\n")
+                replay.write_artifact(
+                    dest, [(json.dumps({"ok": False}, indent=2) + "\n").encode("utf-8")]
+                )
         finally:
             replay.os.replace = original_replace
         self.assertEqual(dest.read_text(encoding="utf-8"), prior)
