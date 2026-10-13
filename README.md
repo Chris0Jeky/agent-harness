@@ -228,4 +228,17 @@ Near-term source work that those files still name, and that the code has not clo
 | File | What it is |
 |---|---|
 | [`BLUEPRINT.md`](BLUEPRINT.md) | Tier ladder T0–T4, principles P1–P12, regions, Gardener, model routing |
-| [`SPECS.md`](SPECS.md) | `tier.json` schema, budgets, hook wiring, deny-floo[+955 bytes at .content[1].resource.text]
+| [`SPECS.md`](SPECS.md) | `tier.json` schema, budgets, hook wiring, deny-floor matrix, Stop hooks, model routing, harness CLI, Gardener, skill-forge, concurrency and review pipeline |
+| [`BOOK.md`](BOOK.md) | The rationale behind the policy and design choices |
+| [`FLOOR_LIMITATIONS.md`](FLOOR_LIMITATIONS.md) | Known limits of the argv tripwire |
+| [`AGENTS.md`](AGENTS.md) | Repository change rules and verification commands |
+
+## License
+
+The owner-authored contents of this repository are licensed under GNU General
+Public License version 3 only (`GPL-3.0-only`). See [`LICENSE`](LICENSE) and
+[`LICENSING.md`](LICENSING.md). The curl-derived option-arity fixture retains
+curl's own licence; see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
+This repository-level decision does not decide the licences of the possible
+future clean-repository plugin or replay products described in the blueprints.
