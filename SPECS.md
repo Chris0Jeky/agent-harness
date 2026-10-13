@@ -1195,8 +1195,14 @@ not complete), mean turns over completed runs, recovery rate over the cases that
 cost per variant. A system evaluation (`scripts/learning_system.py`)
 compares the runs the canary made under the candidate (`variant: gen:<id>`, which must be the
 genome the candidate names) with the runs made under the baseline, leaving out runs whose ids are
-the candidate's own evidence. A run's `variant` is fixed by its first observation, like its split
-key. Each arm reports success
+the candidate's own evidence. A run's `started_at` (its end `at` when no start is recorded)
+and `observed_at` must be at or after the later
+of the candidate's and supplied genome's `at` (the candidate's alone without a genome). Historical
+runs do not meet arm minima; a historical-only comparison is `insufficient` and emits no gate.
+The report ID binds the evaluator revision and normalized UTC cutoff. These are checks on claimed
+source times in the folded latest observation, not immutable experiment assignment or execution
+receipts; those remain #520/#517. The cutoff is artifact creation time, not canary-entry time.
+A run's `variant` is fixed by its first observation, like its split key. Each arm reports success
 (`experience_succeeded`, the one success definition), maturity, clean and revert rates,
 regressions, triage precision, owner-correction rate and cost. It is a non-regression gate: with
 at least `min_runs` (20) runs and `min_matured` (10) matured runs per arm (reverts are only known

@@ -8,6 +8,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
@@ -20,6 +21,11 @@ lc = ls.contracts
 EXAMPLES = ROOT / "schemas" / "learning" / "examples"
 BASE, CAND = "baseline:example", "gen:gen_example-0001"
 AT = "2026-09-20T00:00:00Z"
+CUTOFF = "2026-09-08T11:05:00Z"
+HIST_AT = "2026-09-01T10:20:00Z"
+HIST_OBS = "2026-09-08T10:00:00Z"
+POST_AT = "2026-09-12T10:20:00Z"
+POST_OBS = "2026-09-12T12:00:00Z"
 
 
 def candidate():
@@ -34,6 +40,8 @@ def run(key, variant, immediate="merged", matured="clean", corrected=False, **ex
     record = copy.deepcopy(lc.read_records(EXAMPLES / "estate-experience.json")[0])
     record["source"] = {"kind": "muse-job", "key": key}
     record["id"] = lc.experience_id("muse-job", key)
+    record["at"] = POST_AT
+    record["observed_at"] = POST_OBS
     record["variant"] = variant
     record["outcome"] = {
         "immediate": immediate,
@@ -53,6 +61,8 @@ def run(key, variant, immediate="merged", matured="clean", corrected=False, **ex
             }
         )
     record.update(extra)
+    if "started_at" not in extra:
+        record["started_at"] = record["at"]
     return record
 
 
@@ -143,6 +153,186 @@ class CompareTests(unittest.TestCase):
         report = self.compare(runs)
         self.assertEqual((report["verdict"], report["gate"]), ("insufficient", None))
         self.assertTrue(any("matured runs" in r for r in report["reasons"]))
+
+    def historical_arms(self):
+        runs = []
+        for i in range(20):
+            runs.append(
+                run(
+                    f"hb{i}",
+                    BASE,
+                    at=HIST_AT,
+                    observed_at=HIST_OBS,
+                )
+            )
+            runs.append(
+                run(
+                    f"hc{i}",
+                    CAND,
+                    at=HIST_AT,
+                    observed_at=HIST_OBS,
+                )
+            )
+        return runs
+
+    def test_historical_runs_cannot_supply_a_canary_gate(self):
+        report = self.compare(self.historical_arms())
+        self.assertEqual((report["verdict"], report["gate"]), ("insufficient", None))
+        self.assertEqual(report["arms"]["candidate"]["runs"], 0)
+        self.assertEqual(report["arms"]["baseline"]["runs"], 0)
+
+    def test_run_ending_before_cutoff_but_observed_after_is_ineligible(self):
+        runs = []
+        for i in range(20):
+            runs.append(run(f"sb{i}", BASE, at=HIST_AT, observed_at=POST_OBS))
+            runs.append(run(f"sc{i}", CAND, at=HIST_AT, observed_at=POST_OBS))
+        report = self.compare(runs)
+        self.assertEqual((report["verdict"], report["gate"]), ("insufficient", None))
+        self.assertEqual(report["arms"]["candidate"]["runs"], 0)
+
+    def test_run_starting_before_cutoff_but_ending_after_is_ineligible(self):
+        runs = arms()
+        for record in runs:
+            record["started_at"] = HIST_AT
+        report = self.compare(runs)
+        self.assertEqual((report["verdict"], report["gate"]), ("insufficient", None))
+        self.assertEqual(report["arms"]["candidate"]["runs"], 0)
+        self.assertEqual(report["arms"]["baseline"]["runs"], 0)
+
+    def test_missing_start_time_uses_end_time(self):
+        runs = arms()
+        for record in runs:
+            del record["started_at"]
+        self.assertEqual(self.compare(runs)["verdict"], "pass")
+
+    def test_genome_later_than_candidate_sets_the_cutoff(self):
+        # candidate.at is 11:00, genome.at is 11:05: a run at 11:02 is too early.
+        runs = []
+        for i in range(20):
+            runs.append(
+                run(
+                    f"gb{i}",
+                    BASE,
+                    at="2026-09-08T11:02:00Z",
+                    observed_at="2026-09-08T11:03:00Z",
+                )
+            )
+            runs.append(
+                run(
+                    f"gc{i}",
+                    CAND,
+                    at="2026-09-08T11:02:00Z",
+                    observed_at="2026-09-08T11:03:00Z",
+                )
+            )
+        report = self.compare(runs)
+        self.assertEqual((report["verdict"], report["gate"]), ("insufficient", None))
+
+    def test_candidate_later_than_genome_sets_the_cutoff(self):
+        cand = candidate()
+        cand["at"] = "2026-09-10T11:00:00Z"
+        runs = []
+        for i in range(20):
+            runs.append(
+                run(
+                    f"cb{i}",
+                    BASE,
+                    at="2026-09-09T10:00:00Z",
+                    observed_at="2026-09-09T12:00:00Z",
+                )
+            )
+            runs.append(
+                run(
+                    f"cc{i}",
+                    CAND,
+                    at="2026-09-09T10:00:00Z",
+                    observed_at="2026-09-09T12:00:00Z",
+                )
+            )
+        report = ls.compare(runs, cand, BASE, CAND, at=AT, genome=genome())
+        self.assertEqual((report["verdict"], report["gate"]), ("insufficient", None))
+
+    def test_absent_genome_uses_the_candidate_cutoff(self):
+        cand = candidate()
+        cand["genome"] = None
+        early = []
+        for i in range(20):
+            early.append(
+                run(
+                    f"eb{i}",
+                    BASE,
+                    at="2026-09-08T10:30:00Z",
+                    observed_at="2026-09-08T10:45:00Z",
+                )
+            )
+            early.append(
+                run(
+                    f"ec{i}",
+                    CAND,
+                    at="2026-09-08T10:30:00Z",
+                    observed_at="2026-09-08T10:45:00Z",
+                )
+            )
+        report = ls.compare(early, cand, BASE, CAND, at=AT, genome=None)
+        self.assertEqual((report["verdict"], report["gate"]), ("insufficient", None))
+        report = ls.compare(arms(), cand, BASE, CAND, at=AT, genome=None)
+        self.assertEqual(report["verdict"], "pass")
+        self.assertEqual(report["gate"]["gate"], "canary")
+
+    def test_exact_boundary_instants_are_eligible(self):
+        runs = []
+        for i in range(20):
+            runs.append(run(f"xb{i}", BASE, at=CUTOFF, observed_at=CUTOFF))
+            runs.append(run(f"xc{i}", CAND, at=CUTOFF, observed_at=CUTOFF))
+        report = self.compare(runs)
+        self.assertEqual(report["verdict"], "pass")
+        self.assertEqual(report["gate"]["gate"], "canary")
+
+    def test_timezone_equivalent_boundary_is_eligible(self):
+        equiv = "2026-09-08T11:05:00.000000Z"
+        runs = []
+        for i in range(20):
+            runs.append(run(f"zb{i}", BASE, at=equiv, observed_at=equiv))
+            runs.append(run(f"zc{i}", CAND, at=equiv, observed_at=equiv))
+        report = self.compare(runs)
+        self.assertEqual(report["verdict"], "pass")
+
+    def test_mixed_history_passes_only_on_eligible_runs(self):
+        report = self.compare(self.historical_arms() + arms())
+        self.assertEqual(report["verdict"], "pass")
+        self.assertEqual(report["arms"]["candidate"]["runs"], 20)
+        self.assertEqual(report["arms"]["baseline"]["runs"], 20)
+        short = self.historical_arms() + arms(n=5)
+        report = self.compare(short)
+        self.assertEqual((report["verdict"], report["gate"]), ("insufficient", None))
+
+    def test_malformed_artifact_time_refuses(self):
+        bad = candidate()
+        bad["at"] = "soon"
+        with self.assertRaises(ls.SystemRefusal):
+            ls.compare(arms(), bad, BASE, CAND, at=AT, genome=genome())
+        missing = candidate()
+        del missing["at"]
+        with self.assertRaises(ls.SystemRefusal):
+            ls.compare(arms(), missing, BASE, CAND, at=AT, genome=genome())
+        bad_genome = genome()
+        bad_genome["at"] = "not-a-time"
+        with self.assertRaises(ls.SystemRefusal):
+            ls.compare(arms(), candidate(), BASE, CAND, at=AT, genome=bad_genome)
+
+    def test_revision_and_cutoff_identity(self):
+        report = self.compare(arms())
+        self.assertEqual(report["producer"]["model"], ls.TOOL)
+        with mock.patch.object(ls, "TOOL", ls.TOOL + "-next"):
+            self.assertNotEqual(report["id"], self.compare(arms())["id"])
+        other_genome = genome()
+        other_genome["at"] = "2026-09-08T11:05:00.000000Z"
+        same = self.compare(arms(), genome=other_genome)
+        self.assertEqual(report["id"], same["id"])
+        later_genome = genome()
+        later_genome["at"] = "2026-09-09T11:05:00Z"
+        moved = self.compare(arms(), genome=later_genome)
+        self.assertNotEqual(report["id"], moved["id"])
 
     def test_a_run_cannot_leave_its_arm_when_re_observed(self):
         runs = arms()
