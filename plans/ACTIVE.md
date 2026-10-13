@@ -1,21 +1,21 @@
 # Active workstreams
 
-## Source qualification checkpoint (2026-10-13)
+## Source qualification closeout (2026-10-13)
 
-Observed published source: `main@6749bcf2b4c9cddcfe6ccb4bf865b0eeb83b9409` (#546's merge).
-The finite overnight intake is closed; the steward is drained with no
-in-flight job or pending worker worktree. Historical queued work is retained, not restarted.
+Observed published source: `main@67a60279435c459c51e127ecee78f13a2a380b91` (#562's merge).
+The finite intake is closed. Owned delegate jobs are drained; the scoped lane is archived.
 
-- **Merged:** #541 alias-safe bundle metadata, #542 bounded regex evaluation, #543 optional
-  account attribution and bundle v3, #544 whole outcome-stream validation, #545 shared Python
-  check inventory, #546 README/Pages repairs, #548 canary chronology and #550 escaped workspace path regression coverage. #457, #459, #506 and #533 are closed for source acceptance.
-- **Parked:** #539 retains its confirmed alias-delete defect and failing cross-platform CI.
-  #549 preserves its reviewed atomic-output branch, but macOS CI fails on the normal `/var`
-  temporary-path alias. #551 owns the caller-path binding repair; do not weaken the managed writer's alias refusal. Both PRs have exhausted their existing two-round review budget.
-- **Open evidence:** #520/#517 still require trusted assignment/receipt and clock evidence.
-  #548 uses the latest claimed observation and its known start time; it does not establish immutable historical assignment. #547 tracks obsolete claims in the existing SVG examples.
-- **Boundary:** all acceptance above is source-only. Installed floor/Muse bytes, sibling
-  vendoring, trust, live canaries and public/private corpus publication were not changed. [HUMAN_TODO.md](../HUMAN_TODO.md) retains H-18, H-19 and H-22.
+- **Merged earlier:** #541/#542/#543/#544/#545/#546/#548/#550; #457/#459/#506/#533 closed for source acceptance.
+- **Merged continuation:** #555 private atomic replay publication and parent-only caller binding;
+  #559 bidirectional selected-tree identity refusal; #560 protects named inputs, visited Codex/Claude
+  transcripts and fellow outputs; #561 corrects existing SVG examples; #562 refuses nonfinite/non-JSON
+  record publication and refreshes the validator byte pin (bundle/fixtures remain version 3).
+- **Superseded:** #539/#549 closed without merging their failed heads; branches/history retained.
+- **Open evidence:** #523 retains absent-suffix/native-bind qualification; #556 repeated tree walks;
+  #558 advisory-ledger JSONL/#563 programmatic keys; #520/#517 trusted receipt/clock evidence.
+- **Boundary:** source acceptance only. Doctor exits 1 for installed 1.8.0 versus source 1.8.1 drift
+  and unproven worktree canonical comparison. No installation, trust, live canary, consumer adoption
+  or private corpus publication is inferred. [HUMAN_TODO.md](../HUMAN_TODO.md) retains H-18/H-19/H-22.
 
 The earlier sections below are dated historical checkpoints, not current queue admission.
 

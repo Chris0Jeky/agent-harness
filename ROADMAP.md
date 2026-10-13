@@ -2,16 +2,16 @@
 
 ## Current dependency checkpoint (2026-10-13)
 
-Published source through #546 (`main@6749bcf`) includes #541/#542/#543/#544/#545,
-#548 and #550. [plans/ACTIVE.md](plans/ACTIVE.md) owns the current queue disposition;
-[docs/SYSTEM_STATE.md](docs/SYSTEM_STATE.md) records the evidence boundaries. Source floor
-is 1.8.1; this campaign did not install or activate it.
+Observed source through #562 (`main@67a60279435c459c51e127ecee78f13a2a380b91`) includes the prior source
+qualification and #555/#559/#560/#561/#562. [plans/ACTIVE.md](plans/ACTIVE.md) owns disposition;
+[docs/SYSTEM_STATE.md](docs/SYSTEM_STATE.md) records proof and limits. Source floor is 1.8.1;
+this campaign did not install or activate it. The finite source queue is closed.
 
-The next bounded source seams are #551 (the macOS caller-path failure that parks #549)
-and #539's alias-delete repair. Their previous review budgets remain exhausted. Broader
-canary acceptance remains with #520/#517; #547 records inaccurate historical SVG examples.
-Runtime and publication holds remain in [HUMAN_TODO.md](HUMAN_TODO.md).
-No new work is admitted by this checkpoint. Refresh live state before starting another slice.
+#539/#549 are superseded and closed, with branches retained. Follow-ups stay bounded:
+#523 absent-suffix/native bind evidence, #556 tree-walk cost, #558 advisory-ledger parsing,
+#563 in-process key roundtrip, and #520/#517 trusted canary receipts/clock evidence.
+Runtime/publication holds remain in [HUMAN_TODO.md](HUMAN_TODO.md). Refresh live state
+before admitting another source slice; this checkpoint admits none.
 
 ## Historical epic map (2026-08-08)
 
