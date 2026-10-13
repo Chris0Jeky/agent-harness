@@ -1,5 +1,24 @@
 # Active workstreams
 
+## Source qualification checkpoint (2026-10-13)
+
+Observed published source: `main@6749bcf2b4c9cddcfe6ccb4bf865b0eeb83b9409` (#546's merge).
+The finite overnight intake is closed; the steward is drained with no
+in-flight job or pending worker worktree. Historical queued work is retained, not restarted.
+
+- **Merged:** #541 alias-safe bundle metadata, #542 bounded regex evaluation, #543 optional
+  account attribution and bundle v3, #544 whole outcome-stream validation, #545 shared Python
+  check inventory, #546 README/Pages repairs, #548 canary chronology and #550 escaped workspace path regression coverage. #457, #459, #506 and #533 are closed for source acceptance.
+- **Parked:** #539 retains its confirmed alias-delete defect and failing cross-platform CI.
+  #549 preserves its reviewed atomic-output branch, but macOS CI fails on the normal `/var`
+  temporary-path alias. #551 owns the caller-path binding repair; do not weaken the managed writer's alias refusal. Both PRs have exhausted their existing two-round review budget.
+- **Open evidence:** #520/#517 still require trusted assignment/receipt and clock evidence.
+  #548 uses the latest claimed observation and its known start time; it does not establish immutable historical assignment. #547 tracks obsolete claims in the existing SVG examples.
+- **Boundary:** all acceptance above is source-only. Installed floor/Muse bytes, sibling
+  vendoring, trust, live canaries and public/private corpus publication were not changed. [HUMAN_TODO.md](../HUMAN_TODO.md) retains H-18, H-19 and H-22.
+
+The earlier sections below are dated historical checkpoints, not current queue admission.
+
 ## Workspace reference qualification (2026-10-02)
 
 - #414 and #417 are merged: the handoff pack is an advisory authoring profile and the SQLite receipt lab is a single-owner reference, not native adoption.
