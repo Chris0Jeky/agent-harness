@@ -2922,6 +2922,96 @@ class OutputCollisionTests(EndToEndTestCase):
             "--quiet",
         ]
 
+    def direct_scan(self, runtime, label):
+        root = self.dir / label
+        root.mkdir()
+        transcript = root / "input.jsonl"
+        record = (
+            {
+                "payload": {
+                    "type": "function_call",
+                    "name": "shell_command",
+                    "arguments": json.dumps({"command": "git status"}),
+                }
+            }
+            if runtime == "codex"
+            else {
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Bash",
+                            "input": {"command": "git status"},
+                        }
+                    ]
+                }
+            }
+        )
+        transcript.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        floor = self.write_dispatch(label + "-floor", "1.0.0", 'return "allow", ""')
+        argv = [
+            "--codex-root",
+            str(root) if runtime == "codex" else "none",
+            "--claude-root",
+            str(root) if runtime == "claude" else "none",
+            "--baseline",
+            str(floor),
+            "--candidate",
+            str(floor),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--quiet",
+        ]
+        return root, transcript, argv
+
+    def test_direct_scan_outputs_cannot_replace_transcripts(self):
+        for runtime in ("codex", "claude"):
+            for option in ("--json", "--corpus-cache"):
+                with self.subTest(runtime=runtime, option=option):
+                    root, transcript, argv = self.direct_scan(runtime, runtime + option)
+                    report = root / "report.json"
+                    if option == "--corpus-cache":
+                        argv += ["--json", str(report)]
+                    self.assert_collision(
+                        [*argv, option, str(transcript)],
+                        {transcript: transcript.read_bytes()},
+                        absent=[report],
+                    )
+
+    def test_direct_scan_hardlink_outside_root_is_an_input_collision(self):
+        _, transcript, argv = self.direct_scan("codex", "linked-scan")
+        output = self.dir / "outside-report.json"
+        try:
+            os_module.link(transcript, output)
+        except OSError as error:
+            self.skipTest(f"hardlinks unavailable: {error}")
+        self.assert_collision(
+            [*argv, "--json", str(output)],
+            {transcript: transcript.read_bytes(), output: output.read_bytes()},
+        )
+
+    def test_direct_scan_disjoint_outputs_inside_root_still_publish(self):
+        for runtime in ("codex", "claude"):
+            with self.subTest(runtime=runtime):
+                root, transcript, argv = self.direct_scan(runtime, runtime + "-control")
+                before = transcript.read_bytes()
+                cache, report = root / "cache.jsonl", root / "report.json"
+                code, out, _ = self.run_main(
+                    *argv, "--corpus-cache", str(cache), "--json", str(report)
+                )
+                self.assertEqual(code, 0)
+                self.assertIn("block rate by tier", out)
+                self.assertEqual(transcript.read_bytes(), before)
+                self.assertEqual(set(replay.load_corpus(cache)[0]), {"git status"})
+                self.assertEqual(
+                    json.loads(report.read_text(encoding="utf-8"))["corpus"][
+                        "unique_total"
+                    ],
+                    1,
+                )
+
     def test_json_collides_with_baseline(self):
         corpus = self.write_corpus("git status")
         floor = self.write_dispatch("floor", "1.0.0", 'return "allow", ""')
