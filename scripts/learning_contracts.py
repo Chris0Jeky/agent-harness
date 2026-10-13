@@ -727,6 +727,11 @@ def validate_record(record):
     name = record.get("schema")
     if not isinstance(name, str) or name not in RECORD_SCHEMAS:
         return [f"$.schema: unknown record schema {name!r}"]
+    # Computed values and CLI float options can bypass the strict file decoder.
+    try:
+        json.dumps(record, allow_nan=False)
+    except (TypeError, ValueError, RecursionError) as exc:
+        return [f"$: record is not finite JSON: {type(exc).__name__}"]
     errors = schema_errors(record, RECORD_SCHEMAS[name])
     if errors:
         return errors
