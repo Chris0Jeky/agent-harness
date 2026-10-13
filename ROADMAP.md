@@ -1,6 +1,21 @@
 # Agent Harness roadmap
 
-Snapshot: 2026-08-08, implementation state through `main@a8ed1d481b8903e71b0d0443a67887274d692d92`
+## Current dependency checkpoint (2026-10-13)
+
+Published source through #546 (`main@6749bcf`) includes #541/#542/#543/#544/#545,
+#548 and #550. [plans/ACTIVE.md](plans/ACTIVE.md) owns the current queue disposition;
+[docs/SYSTEM_STATE.md](docs/SYSTEM_STATE.md) records the evidence boundaries. Source floor
+is 1.8.1; this campaign did not install or activate it.
+
+The next bounded source seams are #551 (the macOS caller-path failure that parks #549)
+and #539's alias-delete repair. Their previous review budgets remain exhausted. Broader
+canary acceptance remains with #520/#517; #547 records inaccurate historical SVG examples.
+Runtime and publication holds remain in [HUMAN_TODO.md](HUMAN_TODO.md).
+No new work is admitted by this checkpoint. Refresh live state before starting another slice.
+
+## Historical epic map (2026-08-08)
+
+Historical snapshot: 2026-08-08, implementation state through `main@a8ed1d481b8903e71b0d0443a67887274d692d92`
 (PR #240's merge). PR #230's merge `731624106fc38a9f46e21553c61b3cb0ee56dfeb` remains the last
 commit to change `templates/hooks/dispatch.py`; the 2026-08-07/08 wave changed tests and
 documentation only, so `FLOOR_VERSION` is still 1.6.27.

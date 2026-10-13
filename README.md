@@ -210,9 +210,9 @@ Dated write-ups lag that constant. Read them for evidence, then check the consta
 | File | Role | Snapshot it names |
 |---|---|---|
 | [`AGENT_HARNESS_AGENT_BRIEF.md`](AGENT_HARNESS_AGENT_BRIEF.md) | Mission: Policy Lab, Pattern Guard, Doctor, estate operations | Last reviewed 2026-07-30 |
-| [`plans/ACTIVE.md`](plans/ACTIVE.md) | Declared `status_doc`. At most two active workstreams, plus later owner decisions | 2026-10-02, with owner decisions from 2026-09-29 |
-| [`docs/SYSTEM_STATE.md`](docs/SYSTEM_STATE.md) | Capability ledger and evidence vocabulary | Opens 2026-09-02; later notes through 2026-10-01 |
-| [`ROADMAP.md`](ROADMAP.md) | Epic map AH-1 through AH-10 | 2026-08-08. Its `FLOOR_VERSION` sentence still says 1.6.27 |
+| [`plans/ACTIVE.md`](plans/ACTIVE.md) | Declared `status_doc`. At most two active workstreams, plus later owner decisions | Source checkpoint 2026-10-13; earlier sections are historical |
+| [`docs/SYSTEM_STATE.md`](docs/SYSTEM_STATE.md) | Capability ledger and evidence vocabulary | Source acceptance 2026-10-13; historical runtime records retained |
+| [`ROADMAP.md`](ROADMAP.md) | Dependencies and epic map AH-1 through AH-10 | Current dependency checkpoint 2026-10-13; epic map dated 2026-08-08 |
 | [`HUMAN_TODO.md`](HUMAN_TODO.md) | Human gates | Open: H-18 (private-repo Actions billing), H-19 (PyPI trusted publisher for the replay extraction), H-22 (1.8.0 consumer re-trust and canaries) |
 | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Measured baselines and what they do not prove | Historical B-series |
 | [`docs/observability/AGENT_LOOP_SPANS.md`](docs/observability/AGENT_LOOP_SPANS.md) | Proposed span contract | No exporter, no merge gate |
