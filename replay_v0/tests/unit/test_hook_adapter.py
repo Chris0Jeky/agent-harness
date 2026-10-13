@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -474,6 +475,26 @@ class WorkspaceScrubTests(unittest.TestCase):
         outcome = self._run(hook_path)
         self.assertEqual(outcome.outcome, "deny")
         self.assertEqual(outcome.detail, "blocked-no-path")
+
+    def test_run_hook_scrubs_raw_posix_and_json_escaped_workspace_forms(self) -> None:
+        workspace = Path(str(self.workspace) + "\\nested")
+        forms = {str(workspace), workspace.as_posix()}
+        forms |= {form.replace("\\", "\\\\") for form in list(forms)}
+        message = "blocked: " + " | ".join(sorted(forms))
+        completed = subprocess.CompletedProcess(
+            ["hook"], 2, b"", message.encode("utf-8")
+        )
+        spec = HookSpec(argv=(sys.executable, "hook"), timeout=5.0)
+        payload = build_payload(
+            _event("e-scrub", "x"), runtime="claude", workspace=workspace, index=0
+        )
+        with mock.patch("replay_v0.hooks._run_policy_process", return_value=completed):
+            outcome = run_hook(spec, payload, workspace=workspace)
+        self.assertEqual(outcome.outcome, "deny")
+        self.assertIn("<workspace>", outcome.detail)
+        for form in forms:
+            with self.subTest(form=form):
+                self.assertNotIn(form, outcome.detail)
 
 
 class HookEnvTests(unittest.TestCase):
