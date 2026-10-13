@@ -24,7 +24,7 @@ import tempfile
 import tomllib
 import urllib.parse
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from time import monotonic
@@ -8542,7 +8542,7 @@ def windows_create_staging_file(
 
 
 def write_managed_codex_file(
-    path: Path, content: bytes, mode: int | None = None
+    path: Path, content: bytes | Iterable[bytes], mode: int | None = None
 ) -> None:
     """Replace one file through an exclusive, flushed sibling; never follow a hardlink.
 
@@ -8550,6 +8550,7 @@ def write_managed_codex_file(
     to the staging file before its single fsync, so the flushed file already carries them.
     This is a single-file publication, not a multi-file transaction or a concurrent-writer lock.
     A failed rename leaves the previous destination in place; callers retain recovery backups.
+    Iterable content streams one chunk at a time and is verified by its exact-byte digest.
     """
     temporary: Path | None = None
     try:
@@ -8675,15 +8676,34 @@ def write_managed_codex_file(
                 prefix=".harness-agent-", dir=path.parent
             )
             temporary = Path(temporary_name)
+        content_digest = None
         with os.fdopen(descriptor, "wb") as stream:
-            stream.write(content)
+            if isinstance(content, bytes):
+                stream.write(content)
+            else:
+                content_digest = hashlib.sha256()
+                for chunk in content:
+                    stream.write(chunk)
+                    content_digest.update(chunk)
             stream.flush()
             if mode is not None and os.name != "nt":
                 os.fchmod(stream.fileno(), mode)
             os.fsync(stream.fileno())
         os.replace(temporary, path)
         temporary = None
-        if path_is_alias(path) or not path.is_file() or path.read_bytes() != content:
+        if path_is_alias(path) or not path.is_file():
+            raise HarnessError(
+                f"managed Codex target changed during publication: {path}"
+            )
+        if content_digest is None:
+            matches = path.read_bytes() == content
+        else:
+            with path.open("rb") as stream:
+                matches = (
+                    hashlib.file_digest(stream, "sha256").digest()
+                    == content_digest.digest()
+                )
+        if not matches:
             raise HarnessError(
                 f"managed Codex target changed during publication: {path}"
             )
