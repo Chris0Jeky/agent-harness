@@ -57,8 +57,21 @@ class IPv6PrivacyTests(unittest.TestCase):
         for command, expected in (
             ("curl http://[2001:db8::1]:8080/x", "curl http://<host>/<path>"),
             ("curl https://[2001:db8::1]/", "curl https://<host>/<path>"),
+            ("curl http://[2001:db8::1%25eth0]/x", "curl http://<host>/<path>"),
+            ("curl http://[2001:db8::1%eth0]/x", "curl http://<host>/<path>"),
             ("nc [2001:db8::1] 22", "nc <ip> 22"),
             ("ping6 [fd00::1]", "ping6 <ip>"),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(scrubber.scrub(command), expected)
+
+    def test_bracketed_ipv6_suffixes_are_scrubbed(self):
+        scrubber = Scrubber([])
+        for command, expected in (
+            ("ssh [2001:db8::1]:22", "ssh [<ip>]:22"),
+            ("ssh git@[2001:db8::1]:path", "ssh git@[<ip>]:path"),
+            ("nc [2001:db8::1]:22", "nc <ip>:22"),
+            ("nc git@[2001:db8::1]:path", "nc git@<ip>:path"),
         ):
             with self.subTest(command=command):
                 self.assertEqual(scrubber.scrub(command), expected)
