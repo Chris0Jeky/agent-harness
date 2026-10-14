@@ -157,7 +157,7 @@ _GH_REPO_PARTS = re.compile(
 # Any scheme (https, ssh, git, ...): a private host loses its path too. Paths
 # stop at shell control characters so `url;next-command` keeps its command.
 _URL_HOST = re.compile(
-    r"(?i)\b([a-z][a-z0-9+.-]{0,63}://)([A-Za-z0-9.-]+)(:[0-9]+)?"
+    r"(?i)\b([a-z][a-z0-9+.-]{0,63}://)(\[[0-9a-f:.]+\]|[A-Za-z0-9.-]+)(:[0-9]+)?"
     r"(/[^\s\"';&|<>()`]*)?"
 )
 # scp-style remotes, dotted or single-label: `git@code.example.corp:team/x.git`,
@@ -400,6 +400,15 @@ def _scrub_gh_repo(text: str) -> str:
     return "".join(output)
 
 
+def _is_global_ipv6(host: str) -> bool:
+    """A real IPv6 literal that is not loopback or unspecified (`::1`, `::`)."""
+    try:
+        address = ipaddress.IPv6Address(host)
+    except ValueError:
+        return False
+    return not (address.is_loopback or address.is_unspecified)
+
+
 def _redact_host_token(chunk: str) -> str:
     if "://" in chunk:
         return chunk
@@ -422,6 +431,10 @@ def _redact_host_token(chunk: str) -> str:
         if host.lower() in _PUBLIC_HOSTS:
             return chunk
         host = "<host>"
+    elif ":" in host and _is_global_ipv6(
+        host[1:-1] if host.startswith("[") and host.endswith("]") else host
+    ):
+        host = "<ip>"
     else:
         return chunk
     return f"{quote}{(user + '@' if sep else '')}{host}{quote}"
@@ -919,6 +932,8 @@ class Scrubber:
     @staticmethod
     def _host(match: re.Match[str]) -> str:
         host = match.group(2).lower()
+        if host.startswith("[") and not _is_global_ipv6(host[1:-1]):
+            return match.group(0)
         if host in _PUBLIC_HOSTS:
             return match.group(0)
         return f"{match.group(1)}<host>" + ("/<path>" if match.group(4) else "")

@@ -14,7 +14,7 @@ import unittest
 from collections import Counter
 from pathlib import Path
 
-from replay_v0.importer import claude_commands
+from replay_v0.importer import Scrubber, claude_commands
 
 
 def write_nested_line_then_record(path: Path) -> None:
@@ -49,3 +49,16 @@ class DeeplyNestedLineTests(unittest.TestCase):
             found, [("git status", "2026-02-03T04:05:06Z", "/fictional/app")]
         )
         self.assertEqual(stats["unparsed-lines"], 1)
+
+
+class IPv6PrivacyTests(unittest.TestCase):
+    def test_bracketed_ipv6_addresses_are_scrubbed(self):
+        scrubber = Scrubber([])
+        for command, expected in (
+            ("curl http://[2001:db8::1]:8080/x", "curl http://<host>/<path>"),
+            ("curl https://[2001:db8::1]/", "curl https://<host>/<path>"),
+            ("nc [2001:db8::1] 22", "nc <ip> 22"),
+            ("ping6 [fd00::1]", "ping6 <ip>"),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(scrubber.scrub(command), expected)
