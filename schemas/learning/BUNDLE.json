@@ -1,6 +1,6 @@
 {
   "schema": "learning-contract-bundle/v1",
-  "version": 3,
+  "version": 4,
   "files": [
     {
       "path": "schemas/learning/candidate-genome.schema.json",
@@ -76,7 +76,7 @@
     },
     {
       "path": "scripts/learning_contracts.py",
-      "sha256": "3b51fad6382a21bbcb8e48cdf54b9824432e1cc2f4f370dfa0deea93573e446e"
+      "sha256": "6b594111d6921cf4b7294f76d872999bdc2dcc386c5be51b4f3933a98b0e9e3d"
     }
   ],
   "record_schemas": [
@@ -95,5 +95,5 @@
     "promotion-record/v1",
     "system-run/v1"
   ],
-  "digest": "ee5fdaf78376296ef4d0ed8f453f6ef696207077c23a52c8922e7df2387ca76d"
+  "digest": "9d123592edf3278ddce248cad726e56aa5618407598f0dd57fae1809849b8bdd"
 }

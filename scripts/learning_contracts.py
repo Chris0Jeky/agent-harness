@@ -694,7 +694,8 @@ def _outcome_event_rules(record):
         if record["supersedes"] is not None:
             errors.append("$.supersedes: null exactly when version is 1")
     else:
-        prev = "oev_" + _digest16(f"{run['kind']}|{run['key']}|{record['version'] - 1}")
+        previous = int(record["version"]) - 1
+        prev = "oev_" + _digest16(f"{run['kind']}|{run['key']}|{previous}")
         if record["supersedes"] != prev:
             errors.append(f"$.supersedes: must be the run's previous version {prev}")
     if record["success"] != experience_succeeded({"outcome": record["outcome"]}):
