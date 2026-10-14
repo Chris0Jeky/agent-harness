@@ -14,7 +14,7 @@ import unittest
 from collections import Counter
 from pathlib import Path
 
-from replay_v0.importer import claude_commands
+from replay_v0.importer import Scrubber, claude_commands
 
 
 def write_nested_line_then_record(path: Path) -> None:
@@ -49,3 +49,43 @@ class DeeplyNestedLineTests(unittest.TestCase):
             found, [("git status", "2026-02-03T04:05:06Z", "/fictional/app")]
         )
         self.assertEqual(stats["unparsed-lines"], 1)
+
+
+class NonObjectLineTests(unittest.TestCase):
+    def test_valid_json_non_object_lines_are_counted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "claude"
+            root.mkdir()
+            (root / "s.jsonl").write_text("[]\n42\n\"hi\"\n", encoding="utf-8")
+            stats: Counter[str] = Counter()
+            self.assertEqual(list(claude_commands(root, stats)), [])
+        self.assertEqual(stats["non-object-lines"], 3)
+        self.assertEqual(stats["unparsed-lines"], 0)
+
+
+class BareIpv6LiteralTests(unittest.TestCase):
+    def setUp(self):
+        self.scrubber = Scrubber([])
+
+    def test_global_ipv6_literals_are_redacted(self):
+        for command, secret in (
+            ("ping6 2001:db8::1", "2001:db8::1"),
+            ("ping 2001:db8:85a3::8a2e:370:7334", "8a2e:370:7334"),
+            ("traceroute fd00::abcd", "fd00::abcd"),
+            ("dig fe80::1%eth0", "fe80::1"),
+        ):
+            with self.subTest(command=command):
+                text = self.scrubber.scrub(command)
+                self.assertNotIn(secret, text)
+                self.assertIn("<ip>", text)
+
+    def test_loopback_and_non_addresses_are_unchanged(self):
+        for command in (
+            "ping6 ::1",
+            "ping 127.0.0.1",
+            "host std::vector",
+            "ping 12:34:56",
+            "dig example::",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(self.scrubber.scrub(command), command)

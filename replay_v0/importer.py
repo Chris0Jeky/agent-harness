@@ -400,6 +400,15 @@ def _scrub_gh_repo(text: str) -> str:
     return "".join(output)
 
 
+def _is_global_ipv6(host: str) -> bool:
+    """A real IPv6 literal that is not loopback or unspecified (`::1`, `::`)."""
+    try:
+        address = ipaddress.IPv6Address(host)
+    except ValueError:
+        return False
+    return not (address.is_loopback or address.is_unspecified)
+
+
 def _redact_host_token(chunk: str) -> str:
     if "://" in chunk:
         return chunk
@@ -422,6 +431,8 @@ def _redact_host_token(chunk: str) -> str:
         if host.lower() in _PUBLIC_HOSTS:
             return chunk
         host = "<host>"
+    elif ":" in host and _is_global_ipv6(host):
+        host = "<ip>"
     else:
         return chunk
     return f"{quote}{(user + '@' if sep else '')}{host}{quote}"
@@ -951,6 +962,8 @@ def _iter_jsonl(path: Path, stats: Counter[str]) -> Iterator[dict[str, Any]]:
                 continue
             if isinstance(record, dict):
                 yield record
+            else:
+                stats["non-object-lines"] += 1
 
 
 def _timestamp(value: object) -> str:
