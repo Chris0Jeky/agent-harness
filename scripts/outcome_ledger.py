@@ -579,7 +579,15 @@ def load_ledger(path):
         for number, line in enumerate(handle, 1):
             if not line.strip():
                 continue
-            record = json.loads(line)
+            try:
+                record = json.loads(
+                    line,
+                    object_pairs_hook=_unique_object,
+                    parse_constant=_reject_constant,
+                    parse_float=_finite_float,
+                )
+            except (ValueError, RecursionError) as exc:
+                raise LedgerError(f"{path}:{number}: {exc}") from exc
             if (
                 not isinstance(record, dict)
                 or record.get("type") not in TYPE_ORDER

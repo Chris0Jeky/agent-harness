@@ -172,6 +172,66 @@ class JsonInputTests(unittest.TestCase):
         self.assertEqual(digest, hashlib.sha256(raw).hexdigest())
 
 
+class LedgerInputTests(unittest.TestCase):
+    BAD_LINES = (
+        '{"type":"finding","id":"one","value":NaN}',
+        '{"type":"finding","id":"one","value":Infinity}',
+        '{"type":"finding","id":"one","value":1e400}',
+        '{"type":"finding","id":"old","id":"new"}',
+        '{"type":"finding","id":"one","value":{"x":1,"x":2}}',
+    )
+
+    def test_strict_ledger_errors_include_line_number(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ledger.jsonl"
+            for line in self.BAD_LINES:
+                with self.subTest(line=line):
+                    path.write_text("\n" + line + "\n", encoding="utf-8")
+                    with self.assertRaises(ledger.LedgerError) as caught:
+                        ledger.load_ledger(path)
+                    self.assertIn(f"{path}:2:", str(caught.exception))
+
+    def test_prior_and_metrics_cli_refuse_invalid_ledger(self):
+        root = Root()
+        self.addCleanup(root.cleanup)
+        path = root.path.parent / "ledger.jsonl"
+        target = root.path.parent / "output.jsonl"
+        commands = (
+            ["metrics", "--ledger", str(path)],
+            [
+                "extract",
+                "--runs-root",
+                str(root.path),
+                "--prior",
+                str(path),
+                "--out",
+                str(target),
+            ],
+        )
+        for line in self.BAD_LINES:
+            path.write_text("\n" + line + "\n", encoding="utf-8")
+            for command in commands:
+                with self.subTest(line=line, command=command[0]):
+                    out, err = io.StringIO(), io.StringIO()
+                    with redirect_stdout(out), redirect_stderr(err):
+                        code = ledger.main(command)
+                    self.assertEqual(code, 2)
+                    self.assertIn(f"{path}:2:", json.loads(err.getvalue())["error"])
+                    self.assertEqual(out.getvalue(), "")
+                    self.assertFalse(target.exists())
+
+    def test_valid_ledger_preserves_finite_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ledger.jsonl"
+            record = {
+                "type": "finding",
+                "id": "one",
+                "value": {"large": 1e308, "small": -1e-308, "integer": 10**100},
+            }
+            path.write_text("\n" + json.dumps(record) + "\n", encoding="utf-8")
+            self.assertEqual(ledger.load_ledger(path), {"one": record})
+
+
 class IdentityTests(unittest.TestCase):
     def test_coordinator_id_matches_the_producer_contract(self):
         # Measured against a live claude-config coordinator item on 2026-09-27.

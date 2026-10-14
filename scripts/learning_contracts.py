@@ -721,7 +721,7 @@ SEMANTIC_RULES = {
 
 
 def validate_record(record):
-    """Every contract error in one record; [] means valid."""
+    """Every contract error in one record; all object keys must be strings."""
     if not isinstance(record, dict):
         return ["$: a record is a JSON object"]
     name = record.get("schema")
@@ -732,6 +732,15 @@ def validate_record(record):
         json.dumps(record, allow_nan=False)
     except (TypeError, ValueError, RecursionError) as exc:
         return [f"$: record is not finite JSON: {type(exc).__name__}"]
+    pending = [record]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            if any(not isinstance(key, str) for key in value):
+                return ["$: every object key must be a string"]
+            pending.extend(value.values())
+        elif isinstance(value, (list, tuple)):
+            pending.extend(value)
     errors = schema_errors(record, RECORD_SCHEMAS[name])
     if errors:
         return errors

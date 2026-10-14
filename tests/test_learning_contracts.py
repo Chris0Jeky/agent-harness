@@ -942,6 +942,47 @@ class ReviewRegressionTests(unittest.TestCase):
             self.assertEqual(code, 2)
 
 
+class RecordJsonKeyTests(unittest.TestCase):
+    def test_non_string_keys_are_validation_errors_at_every_depth(self):
+        for key in (1, 1.5, True, None):
+            for values in (
+                {key: "numeric", str(key): "string"},
+                [{"nested": {key: "value"}}],
+                ({key: "value"},),
+            ):
+                with self.subTest(key=key, values=values):
+                    record = candidate(ext={"fixture": {"values": values}})
+                    errors = lc.validate_record(record)
+                    self.assertTrue(
+                        any("object key" in error for error in errors), errors
+                    )
+        record = candidate()
+        record[1] = "value"
+        self.assertTrue(
+            any("object key" in error for error in lc.validate_record(record))
+        )
+
+    def test_string_keys_and_finite_values_roundtrip_strictly(self):
+        record = candidate(
+            ext={
+                "fixture": {
+                    "values": [
+                        {
+                            "1": "string",
+                            "large": 1e308,
+                            "small": -1e-308,
+                            "integer": 10**100,
+                        }
+                    ]
+                }
+            }
+        )
+        self.assertEqual(lc.validate_record(record), [])
+        decoded = lc.loads(json.dumps(record, allow_nan=False))
+        self.assertEqual(decoded, record)
+        self.assertEqual(lc.validate_record(decoded), [])
+
+
 class SplitTests(unittest.TestCase):
     def test_split_is_deterministic_and_near_twenty_percent(self):
         sides = [lc.split_of(f"key-{n}") for n in range(10000)]
