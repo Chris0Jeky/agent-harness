@@ -705,7 +705,7 @@ def wrap_page(title, body, source=None):
     page is built from, for the layout's "Edit this page" link) are added unless it already names them.
     """
     front, body = split_front_matter(body)
-    if front is not None and re.search(r"(?m)^\s*['\"]?permalink['\"]?\s*:", front):
+    if front is not None and re.search(r"(?m)^['\"]?permalink['\"]?[ \t]*:", front):
         raise BuildError(
             f"permalink override in {source}: remove it to use the canonical staged URL"
         )

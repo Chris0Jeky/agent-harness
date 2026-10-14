@@ -544,6 +544,11 @@ class StageTests(StageBase):
                     self.build()
                 self.assertEqual(read_tree(self.out), before)
 
+    def test_permalink_text_inside_a_block_scalar_is_not_an_override(self):
+        write(self.root, "docs/FM.md", "---\ndescription: |\n  permalink: is just prose here\n---\n# FM\n")
+        self.build()
+        self.assertIn("permalink: is just prose here", self.page("docs/FM.md"))
+
     def test_nested_index_navigation_uses_directory_url(self):
         write(self.root, "docs/index.md", "# Docs home\n")
         self.build()
