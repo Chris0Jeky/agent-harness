@@ -632,7 +632,9 @@ def html_name(staged):
 
 def page_url(staged):
     """The site-relative URL Jekyll gives a staged page (`page.url`)."""
-    return "/" if staged == "index.md" else "/" + html_name(staged)
+    if posixpath.basename(staged) == "index.md":
+        return "/" + staged[: -len("index.md")]
+    return "/" + html_name(staged)
 
 
 def yaml_string(value):
@@ -698,10 +700,15 @@ def nav_data(pages):
 def wrap_page(title, body, source=None):
     """Front matter and a Liquid-safe body for one page. Navigation comes from the layout.
 
-    Front matter the document already carries is kept; `layout` and `source_path` (the repository file the
+    Front matter is kept, but permalink overrides are rejected so navigation and body links agree.
+    `layout` and `source_path` (the repository file the
     page is built from, for the layout's "Edit this page" link) are added unless it already names them.
     """
     front, body = split_front_matter(body)
+    if front is not None and re.search(r"(?m)^\s*['\"]?permalink['\"]?\s*:", front):
+        raise BuildError(
+            f"permalink override in {source}: remove it to use the canonical staged URL"
+        )
     lines = [] if front is None else front.split("\n")
     if not any(line.startswith("title:") for line in lines):
         lines.insert(0, f"title: {json.dumps(title, ensure_ascii=False)}")
