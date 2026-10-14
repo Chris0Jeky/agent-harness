@@ -1,0 +1,19 @@
+{
+  "schema": "agent-hq/hosting-manifest@2",
+  "stable_id": "agent-harness",
+  "repository": "Chris0Jeky/agent-harness",
+  "reviewed_on": "2026-10-14",
+  "status": "live",
+  "workload": {"class": "edge", "serves": "static", "package": "static-build", "host_bound": false,
+               "always_on": false, "request_path": "assets"},
+  "state": {"authority": "none", "writers": "none", "replicas": 0},
+  "ingress": {"mode": "public", "private_by_design": false, "hostnames": []},
+  "data_classes": ["public"],
+  "backup": {"policy": "none-needed"},
+  "deploy": {"lane": "edge", "artifact": "static-build-sha", "strategy": "none"},
+  "health": {"endpoint": null, "observer": "external-probe", "signals": ["readiness"]},
+  "cost": {"envelope_usd_month": 0},
+  "adapters": [{"provider": "github-pages", "role": "primary", "status": "live", "descriptor": ".github/workflows/pages.yml"}],
+  "notes": ["docs.deliverasoft.com is reserved in the agent-hq DNS plan and the domain is not bought yet; ingress.hostnames stays empty until it exists (agent-harness#499)."],
+  "activation_authorized": false
+}
