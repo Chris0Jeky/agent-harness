@@ -7973,7 +7973,12 @@ def sync_source_overlaps_path(source: Path, path: Path) -> bool:
     )
 
 
-def sync_trees_overlap(left: Path, right: Path) -> bool:
+def sync_trees_overlap(
+    left: Path,
+    right: Path,
+    *,
+    identity_cache: dict[str, set[tuple[int, int]]] | None = None,
+) -> bool:
     """Compare selected source/live directories in both directions before writes."""
     if sync_paths_overlap(left, right):
         return True
@@ -7992,8 +7997,18 @@ def sync_trees_overlap(left: Path, right: Path) -> bool:
             observed.add((info.st_dev, info.st_ino))
         return observed
 
-    left_ids = identities(sync_tree_directory_paths(left))
-    right_ids = identities(sync_tree_directory_paths(right))
+    def tree_identities(path: Path) -> set[tuple[int, int]]:
+        # String keys preserve case on case-sensitive Windows directories.
+        key = str(path)
+        if identity_cache is not None and key in identity_cache:
+            return identity_cache[key]
+        observed = identities(sync_tree_directory_paths(path))
+        if identity_cache is not None:
+            identity_cache[key] = observed
+        return observed
+
+    left_ids = tree_identities(left)
+    right_ids = tree_identities(right)
     return bool(
         left_ids & (right_ids | identities(tuple(right.parents)))
         or right_ids & identities(tuple(left.parents))
@@ -8027,7 +8042,12 @@ def preflight_sync_backup_parent(
             )
 
 
-def preflight_claude_skill(source: Path, target: Path) -> tuple[str, str | None, bool]:
+def preflight_claude_skill(
+    source: Path,
+    target: Path,
+    *,
+    identity_cache: dict[str, set[tuple[int, int]]] | None = None,
+) -> tuple[str, str | None, bool]:
     """Validate one isolated Claude skill source and destination before writes."""
     reject_sync_path_aliases(source, "Claude skill source")
     reject_sync_path_aliases(target, "Claude skill destination")
@@ -8039,7 +8059,7 @@ def preflight_claude_skill(source: Path, target: Path) -> tuple[str, str | None,
         raise HarnessError(
             f"Claude skill source is missing ordinary SKILL.md: {source}"
         )
-    if sync_trees_overlap(source, target):
+    if sync_trees_overlap(source, target, identity_cache=identity_cache):
         raise HarnessError(
             f"Claude skill source and destination overlap: {source}; {target}"
         )
@@ -10665,9 +10685,15 @@ def preflight_bundle_storage(
             )
 
 
-def validate_bundle_targets(components: list[dict[str, Any]]) -> None:
+def validate_bundle_targets(
+    components: list[dict[str, Any]],
+    *,
+    identity_cache: dict[str, set[tuple[int, int]]] | None = None,
+) -> None:
     """Reject duplicate and ancestor-overlapping live destinations."""
     seen: dict[str, Path] = {}
+    if identity_cache is None:
+        identity_cache = {}
     for component in components:
         target = component["target"]
         target_key = worktree_path_key(target)
@@ -10676,7 +10702,7 @@ def validate_bundle_targets(components: list[dict[str, Any]]) -> None:
                 f"bundle destinations collide: {seen[target_key]}; {target}"
             )
         for earlier in seen.values():
-            if sync_trees_overlap(earlier, target):
+            if sync_trees_overlap(earlier, target, identity_cache=identity_cache):
                 raise HarnessError(f"bundle destinations overlap: {earlier}; {target}")
         seen[target_key] = target
 
@@ -10706,6 +10732,7 @@ def load_sync_bundle(
         raise HarnessError(f"bundle {bundle_name!r} must contain components")
 
     components: list[dict[str, Any]] = []
+    identity_cache: dict[str, set[tuple[int, int]]] = {}
     for index, raw in enumerate(raw_components):
         if not isinstance(raw, dict) or set(raw) != {"kind", "source", "destination"}:
             raise HarnessError(f"invalid bundle component {index}")
@@ -10733,7 +10760,7 @@ def load_sync_bundle(
         source_digest = bundle_component_digest(kind, source, "bundle source")
         if source_digest is None:
             raise HarnessError(f"missing bundle source: {source}")
-        if sync_trees_overlap(source, target):
+        if sync_trees_overlap(source, target, identity_cache=identity_cache):
             raise HarnessError(
                 f"bundle source and destination overlap: {source}; {target}"
             )
@@ -10750,10 +10777,12 @@ def load_sync_bundle(
                 "target_digest": target_digest,
             }
         )
-    validate_bundle_targets(components)
+    validate_bundle_targets(components, identity_cache=identity_cache)
     for component in components:
         for other in components:
-            if sync_trees_overlap(other["source"], component["target"]):
+            if sync_trees_overlap(
+                other["source"], component["target"], identity_cache=identity_cache
+            ):
                 raise HarnessError(
                     "bundle source and destination sets overlap: "
                     f"{other['source']}; {component['target']}"
@@ -11346,15 +11375,16 @@ def sync_global(args: argparse.Namespace) -> int:
         for name in sorted(selected_claude_skills)
     ]
     selected_actions = [*skill_actions, *claude_skill_actions]
+    identity_cache: dict[str, set[tuple[int, int]]] = {}
     for source, _target in selected_actions:
         for _other_source, target in selected_actions:
-            if sync_trees_overlap(source, target):
+            if sync_trees_overlap(source, target, identity_cache=identity_cache):
                 raise HarnessError(
                     f"selected skill source and destination overlap: {source}; {target}"
                 )
     for index, (_source, target) in enumerate(selected_actions):
         for _other_source, other in selected_actions[:index]:
-            if sync_trees_overlap(target, other):
+            if sync_trees_overlap(target, other, identity_cache=identity_cache):
                 try:
                     collision = str(target.resolve()) == str(
                         other.resolve()
@@ -11392,7 +11422,9 @@ def sync_global(args: argparse.Namespace) -> int:
         skill_states.append((source, target, equal))
     claude_skill_states: list[tuple[Path, Path, str, str | None, bool]] = []
     for source, target in claude_skill_actions:
-        source_digest, target_digest, equal = preflight_claude_skill(source, target)
+        source_digest, target_digest, equal = preflight_claude_skill(
+            source, target, identity_cache=identity_cache
+        )
         claude_skill_states.append(
             (source, target, source_digest, target_digest, equal)
         )

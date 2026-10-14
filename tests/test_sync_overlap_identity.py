@@ -247,6 +247,104 @@ class SyncOverlapIdentityTests(unittest.TestCase):
         )
         self.assertFalse(harness.sync_paths_overlap(root / "one", root / "two"))
 
+    def test_selected_pair_preflight_enumerates_each_tree_once(self):
+        names = tuple(f"skill-{index}" for index in range(12))
+        _config, home, args = self.fixture.make_claude_skill_sync_fixture(
+            "pair-count", names
+        )
+        for name in names:
+            target = home / "skills" / name
+            target.mkdir(parents=True)
+            (target / "SKILL.md").write_text("old skill", encoding="utf-8")
+        with (
+            mock.patch.object(
+                harness,
+                "sync_tree_directory_paths",
+                wraps=harness.sync_tree_directory_paths,
+            ) as enumerate_tree,
+            mock.patch.object(
+                harness,
+                "preflight_selected_skill_roots",
+                side_effect=RuntimeError("pair preflight complete"),
+            ),
+            redirect_stdout(io.StringIO()),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "pair preflight complete"):
+                harness.sync_global(args)
+        self.assertEqual(2 * len(names), enumerate_tree.call_count)
+
+    def test_bundle_preflight_enumerates_each_tree_once(self):
+        config, home, _bin, _args = self.fixture.make_bundle_sync_fixture(
+            "bundle-count"
+        )
+        components = []
+        for index in range(12):
+            relative = f"skills/skill-{index}"
+            for root in (config, home):
+                tree = root / relative
+                tree.mkdir(parents=True)
+                (tree / "SKILL.md").write_text("skill", encoding="utf-8")
+            components.append(
+                {
+                    "kind": "tree",
+                    "source": relative,
+                    "destination": {"root": "claude-home", "path": relative},
+                }
+            )
+        manifest = config / harness.SYNC_GLOBAL_BUNDLE_MANIFEST
+        payload = json.loads(manifest.read_text("utf-8"))
+        payload["bundles"]["muse-runtime"]["components"] = components
+        manifest.write_text(json.dumps(payload), encoding="utf-8")
+        for _ in range(2):
+            with mock.patch.object(
+                harness,
+                "sync_tree_directory_paths",
+                wraps=harness.sync_tree_directory_paths,
+            ) as enumerate_tree:
+                harness.load_sync_bundle(config, {"claude-home": home}, "muse-runtime")
+            self.assertEqual(2 * len(components), enumerate_tree.call_count)
+
+    def test_apply_rechecks_tree_identity_after_staging(self):
+        config, home, args = self.fixture.make_claude_skill_sync_fixture(
+            "late-identity"
+        )
+        source = config / "skills/sample"
+        target = home / "skills/sample"
+        for tree in (source, target):
+            (tree / "assets").mkdir(parents=True)
+        (target / "SKILL.md").write_bytes(b"old skill")
+        before = harness.tree_digest(target)
+        real_copytree = harness.shutil.copytree
+        real_stat = Path.stat
+        staged = False
+
+        def copytree(src, dst, *a, **kw):
+            nonlocal staged
+            result = real_copytree(src, dst, *a, **kw)
+            if Path(src) == source:
+                staged = True
+            return result
+
+        def identity(path, *a, **kw):
+            info = real_stat(path, *a, **kw)
+            if staged and path == target / "assets":
+                values = list(info)
+                source_info = real_stat(source)
+                values[stat.ST_DEV] = source_info.st_dev
+                values[stat.ST_INO] = source_info.st_ino
+                return os.stat_result(values)
+            return info
+
+        with (
+            mock.patch.object(harness.shutil, "copytree", side_effect=copytree),
+            mock.patch.object(Path, "stat", identity),
+            redirect_stdout(io.StringIO()),
+        ):
+            with self.assertRaisesRegex(harness.HarnessError, "overlap"):
+                harness.sync_global(args)
+        self.assertTrue(staged)
+        self.assertEqual(before, harness.tree_digest(target))
+
     def test_identity_inspection_errors_are_bounded(self):
         left, right = (
             Path(self.fixture.temp.name) / "left",
