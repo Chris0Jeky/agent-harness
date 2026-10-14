@@ -134,29 +134,23 @@ def read_tree(out):
     }
 
 
-NAV_ITEM = re.compile(r'^ +- \{title: (".*"), url: (".*")\}$')
-GROUP_HEAD = re.compile(r'^  - title: (".*")$')
-
-
-def parse_nav(text):
-    """`_data/docs_nav.yml` as {top: [(title, url)], groups: [(title, [(title, url)])], scalars: {...}}."""
-    nav = {"top": [], "groups": [], "scalars": {}}
-    section = None
-    for line in text.split("\n"):
-        item, head = NAV_ITEM.match(line), GROUP_HEAD.match(line)
-        if line in ("top:", "groups:"):
-            section = line[:-1]
-        elif head:
-            nav["groups"].append((json.loads(head.group(1)), []))
-        elif item:
-            pair = (json.loads(item.group(1)), json.loads(item.group(2)))
-            (nav["top"] if section == "top" else nav["groups"][-1][1]).append(pair)
-        elif line and not line.startswith(" ") and ": " in line:
-            key, value = line.split(": ", 1)
-            nav["scalars"][key] = json.loads(value) if value.startswith('"') else value
-        elif line.strip() and line.strip() != "pages:":
-            raise AssertionError(f"unexpected line in docs_nav.yml: {line!r}")
-    return nav
+def parse_nav(testcase, text):
+    """Parse generated YAML, keeping the tuple shape used by the assertions."""
+    try:
+        import yaml
+    except ImportError:
+        testcase.skipTest("PyYAML is not installed")
+    data = yaml.safe_load(text)
+    return {
+        "top": [(item["title"], item["url"]) for item in data["top"]],
+        "groups": [
+            (group["title"], [(item["title"], item["url"]) for item in group["pages"]])
+            for group in data["groups"]
+        ],
+        "scalars": {
+            key: value for key, value in data.items() if key not in ("top", "groups")
+        },
+    }
 
 
 def liquid_render(text):
@@ -230,7 +224,7 @@ class StageTests(StageBase):
 
     def test_nav_data_has_brand_top_entries_and_grouped_sidebar(self):
         self.build()
-        nav = parse_nav(self.page("_data/docs_nav.yml"))
+        nav = parse_nav(self, self.page("_data/docs_nav.yml"))
         self.assertEqual(nav["scalars"]["title"], "agent-harness")
         self.assertEqual(nav["scalars"]["tagline"], site.DESCRIPTION)
         self.assertEqual(nav["scalars"]["repo"], REPO_URL)
@@ -261,7 +255,7 @@ class StageTests(StageBase):
 
     def test_nav_data_lists_every_staged_page_once(self):
         staged = self.build()
-        nav = parse_nav(self.page("_data/docs_nav.yml"))
+        nav = parse_nav(self, self.page("_data/docs_nav.yml"))
         urls = [url for _, pages in nav["groups"] for _, url in pages]
         self.assertEqual(len(urls), len(set(urls)))
         expected = {
@@ -272,7 +266,7 @@ class StageTests(StageBase):
 
     def test_every_nav_url_maps_to_a_staged_page(self):
         self.build()
-        nav = parse_nav(self.page("_data/docs_nav.yml"))
+        nav = parse_nav(self, self.page("_data/docs_nav.yml"))
         urls = [url for _, url in nav["top"]]
         urls += [url for _, pages in nav["groups"] for _, url in pages]
         for url in urls:
@@ -280,11 +274,14 @@ class StageTests(StageBase):
             self.assertTrue((self.out / rel).is_file(), f"{url} is not a staged page")
 
     def test_nav_data_is_deterministic_and_quotes_awkward_titles(self):
+        self.enterContext(mock.patch.object(site, "DESCRIPTION", "First\u2028second"))
         write(self.root, "docs/ODD.md", '# "Quoted": a {{ title }} here\n')
         self.build()
         first = self.page("_data/docs_nav.yml")
-        self.assertNotIn(" ", first)
-        nav = parse_nav(first)
+        self.assertIn(r"\"Quoted\"", first)
+        self.assertIn(r"\u2028", first)
+        nav = parse_nav(self, first)
+        self.assertEqual(nav["scalars"]["tagline"], "First\u2028second")
         docs = dict(nav["groups"])["Docs"]
         self.assertIn(('"Quoted": a {{ title }} here', "/docs/ODD.html"), docs)
         self.build()
@@ -292,15 +289,18 @@ class StageTests(StageBase):
 
     def test_yaml_strings_escape_line_separators(self):
         bs = chr(92)
-        raw = "a" + chr(0x2028) + "b" + chr(0x85) + 'c "q" ' + chr(92) + " d"
+        raw = "a\u2028b\u2029c\x85" + 'c "q" \\ d'
         text = site.yaml_string(raw)
         for char in (chr(0x2028), chr(0x2029), chr(0x85)):
             self.assertNotIn(char, text)
+            self.assertIn("\\u%04x" % ord(char), text)
         self.assertEqual(
             text,
             '"a'
             + bs
             + "u2028b"
+            + bs
+            + "u2029c"
             + bs
             + "u0085c "
             + bs
@@ -311,7 +311,9 @@ class StageTests(StageBase):
             + bs
             + ' d"',
         )
-        self.assertEqual(json.loads(text), raw)  # JSON-quoted strings are valid YAML
+        self.assertEqual(json.loads(text), raw)
+        nav = parse_nav(self, site.nav_data([("docs/ODD.md", raw)]))
+        self.assertIn((raw, "/docs/ODD.html"), dict(nav["groups"])["Docs"])
 
     def test_group_titles_are_human_friendly(self):
         self.assertEqual(site.folder_title(""), "Overview")
@@ -520,17 +522,42 @@ class StageTests(StageBase):
         write(
             self.root,
             "docs/FM.md",
-            "---\nlayout: default\npermalink: /fm/\n---\n# FM Doc\n\nx\n",
+            "---\nlayout: default\ncategory: reference\n---\n# FM Doc\n\nx\n",
         )
         self.build()
         text = self.page("docs/FM.md")
         self.assertTrue(text.startswith("---\n"))
         head, rest = text.split("\n---\n", 1)
         self.assertEqual(head.count("layout:"), 1)
-        self.assertIn("permalink: /fm/", head)
+        self.assertIn("category: reference", head)
         self.assertIn('title: "FM Doc"', head)
         self.assertIn("{% raw %}", rest)
         self.assertEqual(text.count("\n---\n"), 1)
+
+    def test_permalink_overrides_fail_before_replacing_output(self):
+        self.build()
+        before = read_tree(self.out)
+        for value in ("/fm/", '"/fm/"', "|\n  /fm/"):
+            with self.subTest(value=value):
+                write(self.root, "docs/FM.md", f"---\npermalink: {value}\n---\n# FM\n")
+                with self.assertRaisesRegex(site.BuildError, "permalink.*docs/FM.md"):
+                    self.build()
+                self.assertEqual(read_tree(self.out), before)
+
+    def test_permalink_text_inside_a_block_scalar_is_not_an_override(self):
+        write(
+            self.root,
+            "docs/FM.md",
+            "---\ndescription: |\n  permalink: is just prose here\n---\n# FM\n",
+        )
+        self.build()
+        self.assertIn("permalink: is just prose here", self.page("docs/FM.md"))
+
+    def test_nested_index_navigation_uses_directory_url(self):
+        write(self.root, "docs/index.md", "# Docs home\n")
+        self.build()
+        nav = parse_nav(self, self.page("_data/docs_nav.yml"))
+        self.assertIn(("Docs home", "/docs/"), dict(nav["groups"])["Docs"])
 
     def test_crlf_sources_are_normalised(self):
         (self.root / "docs" / "CRLF.md").write_bytes(b"# Crlf\r\n\r\nbody\r\n")
