@@ -966,6 +966,8 @@ def _iter_jsonl(path: Path, stats: Counter[str]) -> Iterator[dict[str, Any]]:
                 continue
             if isinstance(record, dict):
                 yield record
+            else:
+                stats["non-object-lines"] += 1
 
 
 def _timestamp(value: object) -> str:
