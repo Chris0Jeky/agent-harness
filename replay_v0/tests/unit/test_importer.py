@@ -312,6 +312,23 @@ class ScrubberTests(unittest.TestCase):
         for private in ("private.corp", "acme", "secret", "build.internal", "proj"):
             self.assertNotIn(private, text)
 
+    def test_bracketed_ipv6_url_hosts(self) -> None:
+        for command, expected in (
+            ("curl http://[2001:db8::1]:8080/x", "curl http://<host>/<path>"),
+            ("curl https://[2001:db8::1]/", "curl https://<host>/<path>"),
+            ("curl http://10.0.0.5/x", "curl http://<host>/<path>"),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(self.scrubber.scrub(command), expected)
+        for command in (
+            "curl http://[::1]:8080/x",
+            "curl http://127.0.0.1:8080/x",
+            "curl http://[::]/x",
+            "curl http://[12:34]/x",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(self.scrubber.scrub(command), command)
+
     def test_url_scrub_keeps_the_following_command(self) -> None:
         text = self.scrubber.scrub(
             "curl https://private.corp/a;rm -rf /tmp/x && "

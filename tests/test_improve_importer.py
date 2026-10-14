@@ -51,12 +51,25 @@ class DeeplyNestedLineTests(unittest.TestCase):
         self.assertEqual(stats["unparsed-lines"], 1)
 
 
+class IPv6PrivacyTests(unittest.TestCase):
+    def test_bracketed_ipv6_addresses_are_scrubbed(self):
+        scrubber = Scrubber([])
+        for command, expected in (
+            ("curl http://[2001:db8::1]:8080/x", "curl http://<host>/<path>"),
+            ("curl https://[2001:db8::1]/", "curl https://<host>/<path>"),
+            ("nc [2001:db8::1] 22", "nc <ip> 22"),
+            ("ping6 [fd00::1]", "ping6 <ip>"),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(scrubber.scrub(command), expected)
+
+
 class NonObjectLineTests(unittest.TestCase):
     def test_valid_json_non_object_lines_are_counted(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "claude"
             root.mkdir()
-            (root / "s.jsonl").write_text("[]\n42\n\"hi\"\n", encoding="utf-8")
+            (root / "s.jsonl").write_text('[]\n42\n"hi"\n', encoding="utf-8")
             stats: Counter[str] = Counter()
             self.assertEqual(list(claude_commands(root, stats)), [])
         self.assertEqual(stats["non-object-lines"], 3)

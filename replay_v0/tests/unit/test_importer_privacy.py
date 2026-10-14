@@ -16,6 +16,27 @@ from replay_v0.importer import (
 
 
 class ContextualPrivacyTests(unittest.TestCase):
+    def test_bracketed_ipv6_host_commands(self):
+        scrubber = Scrubber([])
+        for command, expected in (
+            ("nc [2001:db8::1] 22", "nc <ip> 22"),
+            ("ping6 [fd00::1]", "ping6 <ip>"),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(scrubber.scrub(command), expected)
+        for host in (
+            "[::1]",
+            "::1",
+            "127.0.0.1",
+            "[::]",
+            "std::vector",
+            "[link](x)",
+            "[12:34]",
+        ):
+            command = f"ping6 {host}"
+            with self.subTest(command=command):
+                self.assertEqual(scrubber.scrub(command), command)
+
     def test_gh_repository_value_options(self):
         scrubber = Scrubber([])
         for verb, long, short in (
