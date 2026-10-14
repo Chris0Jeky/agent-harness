@@ -206,6 +206,14 @@ class OutcomeTests(unittest.TestCase):
                 self.assertEqual(events[-1]["outcome"]["matured"], "clean")
                 self.assertEqual(events[-1]["variant"], first["variant"])
 
+    def test_integral_float_version_is_the_same_version(self):
+        event = self.project(history())[1]
+        self.assertEqual(event["version"], 2)
+        event["version"] = 2.0
+        self.assertEqual(lc.validate_record(event), [])
+        event["version"] = 2.5
+        self.assertTrue(lc.validate_record(event))
+
     def test_event_semantics_reject_hand_edits(self):
         event = self.project(history())[1]
         changes = [

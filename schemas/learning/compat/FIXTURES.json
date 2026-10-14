@@ -1,6 +1,6 @@
 {
   "schema": "learning-compat-fixtures/v1",
-  "version": 3,
+  "version": 4,
   "files": [
     {
       "path": "schemas/learning/compat/README.md",
