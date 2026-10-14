@@ -157,7 +157,7 @@ _GH_REPO_PARTS = re.compile(
 # Any scheme (https, ssh, git, ...): a private host loses its path too. Paths
 # stop at shell control characters so `url;next-command` keeps its command.
 _URL_HOST = re.compile(
-    r"(?i)\b([a-z][a-z0-9+.-]{0,63}://)(\[[0-9a-f:.]+\]|[A-Za-z0-9.-]+)(:[0-9]+)?"
+    r"(?i)\b([a-z][a-z0-9+.-]{0,63}://)(\[[0-9a-f:.]+(?:%(?:25)?[A-Za-z0-9_.~-]+)?\]|[A-Za-z0-9.-]+)(:[0-9]+)?"
     r"(/[^\s\"';&|<>()`]*)?"
 )
 # scp-style remotes, dotted or single-label: `git@code.example.corp:team/x.git`,
@@ -423,6 +423,13 @@ def _redact_host_token(chunk: str) -> str:
             return chunk
     else:
         host = body
+    suffix = ""
+    if host.startswith("["):
+        match = re.fullmatch(r"\[([^]\s]+)\](:[^\s]*)?", host)
+        if match is None or not _is_global_ipv6(match.group(1)):
+            return chunk
+        suffix = match.group(2) or ""
+        host = match.group(1)
     if _IPV4_LITERAL.fullmatch(host):
         if host == "127.0.0.1" or host.startswith("0."):
             return chunk
@@ -437,7 +444,7 @@ def _redact_host_token(chunk: str) -> str:
         host = "<ip>"
     else:
         return chunk
-    return f"{quote}{(user + '@' if sep else '')}{host}{quote}"
+    return f"{quote}{(user + '@' if sep else '')}{host}{suffix}{quote}"
 
 
 def _redact_scp_token(chunk: str) -> str:
@@ -617,7 +624,7 @@ def _redact_ssh_destination(chunk: str) -> str:
     port = ""
     bracketed = host.startswith("[")
     if bracketed:
-        match = re.fullmatch(r"\[([^]\s]+)\](:[0-9]+)?", host)
+        match = re.fullmatch(r"\[([^]\s]+)\](:[^\s]*)?", host)
         if match is None:
             return chunk
         host, port = match.group(1), match.group(2) or ""
@@ -633,7 +640,7 @@ def _redact_ssh_destination(chunk: str) -> str:
     except ValueError:
         address = None
     if address is not None:
-        if address.is_loopback:
+        if address.is_loopback or address.is_unspecified:
             return chunk
         replacement = "<ip>"
     elif bracketed:
@@ -932,7 +939,7 @@ class Scrubber:
     @staticmethod
     def _host(match: re.Match[str]) -> str:
         host = match.group(2).lower()
-        if host.startswith("[") and not _is_global_ipv6(host[1:-1]):
+        if host.startswith("[") and not _is_global_ipv6(host[1:-1].split("%", 1)[0]):
             return match.group(0)
         if host in _PUBLIC_HOSTS:
             return match.group(0)

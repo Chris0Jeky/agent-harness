@@ -21,6 +21,10 @@ class ContextualPrivacyTests(unittest.TestCase):
         for command, expected in (
             ("nc [2001:db8::1] 22", "nc <ip> 22"),
             ("ping6 [fd00::1]", "ping6 <ip>"),
+            ("curl http://[2001:db8::1%25eth0]/x", "curl http://<host>/<path>"),
+            ("curl http://[2001:db8::1%eth0]/x", "curl http://<host>/<path>"),
+            ("ssh [2001:db8::1]:22", "ssh [<ip>]:22"),
+            ("ssh git@[2001:db8::1]:path", "ssh git@[<ip>]:path"),
         ):
             with self.subTest(command=command):
                 self.assertEqual(scrubber.scrub(command), expected)
@@ -32,8 +36,22 @@ class ContextualPrivacyTests(unittest.TestCase):
             "std::vector",
             "[link](x)",
             "[12:34]",
+            "[::1]:22",
+            "[::]:22",
+            "[a](b)",
+            "[12:34]:x",
         ):
             command = f"ping6 {host}"
+            with self.subTest(command=command):
+                self.assertEqual(scrubber.scrub(command), command)
+        for command in (
+            "ssh [::1]:22",
+            "ssh [::]:22",
+            "ssh [a](b)",
+            "ssh [12:34]:x",
+            "curl http://[::1%25eth0]/x",
+            "curl http://[::%eth0]/x",
+        ):
             with self.subTest(command=command):
                 self.assertEqual(scrubber.scrub(command), command)
 
