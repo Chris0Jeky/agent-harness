@@ -9,6 +9,7 @@ from replay_v0.compare import (
     DIFF_CLASSES,
     compare_decisions,
 )
+from replay_v0.corpus import ValidationError
 from replay_v0.policy_sources import SourceFailure
 from replay_v0.reports import (
     DECISION_REPLAY_LIMITATION,
@@ -129,6 +130,18 @@ class ComparisonTests(unittest.TestCase):
             events, [self.baseline[0]], [self.candidate[0]], case_values=cases
         )
         self.assertEqual("unchanged", result.results[0].classification)
+
+    def test_duplicate_decision_ids_fail_instead_of_collapsing(self) -> None:
+        # _index_exact_decisions builds a dict, so only the upstream validator
+        # stops a conflicting second decision from silently replacing the first.
+        conflicting = decision(self.candidate[0]["event_id"], "deny", "candidate")
+        for label, baseline, candidate in (
+            ("baseline", [*self.baseline, conflicting], self.candidate),
+            ("candidate", self.baseline, [*self.candidate, conflicting]),
+        ):
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(ValidationError, "duplicate event_id"):
+                    compare_decisions(self.events, baseline, candidate)
 
     def test_missing_or_unexpected_decisions_and_cases_fail(self) -> None:
         with self.assertRaisesRegex(ComparisonError, "missing"):
