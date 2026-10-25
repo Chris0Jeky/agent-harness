@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from replay_v0.digests import (
     canonical_json_bytes,
@@ -90,6 +91,42 @@ class DigestTests(unittest.TestCase):
             read_only = sha256_tree(root)
 
         self.assertNotEqual(writable, read_only)
+
+    def test_tree_digest_rejects_a_symlink_root(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            root = Path(raw_directory)
+            with mock.patch.object(Path, "is_symlink", return_value=True):
+                with self.assertRaisesRegex(OSError, "readable directory"):
+                    sha256_tree(root)
+
+    def test_tree_digest_rejects_directory_symlink_entries(self) -> None:
+        # Portable stand-in for a directory symlink: Windows lacks the privilege.
+        with tempfile.TemporaryDirectory() as raw_directory:
+            root = Path(raw_directory)
+            (root / "dir").mkdir()
+            with mock.patch.object(Path, "is_symlink", lambda self: self.name == "dir"):
+                with self.assertRaisesRegex(OSError, "directory or broken symlinks"):
+                    sha256_tree(root)
+
+    def test_tree_digest_rejects_real_directory_and_broken_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            (directory / "real").mkdir()
+            cases = {"dir": directory / "real", "broken": directory / "missing"}
+            for name, target in cases.items():
+                root = directory / f"tree-{name}"
+                root.mkdir()
+                try:
+                    (root / "link").symlink_to(
+                        target, target_is_directory=name == "dir"
+                    )
+                except (OSError, NotImplementedError) as exc:
+                    self.skipTest(f"symlink creation is unavailable: {exc}")
+                with self.subTest(kind=name):
+                    with self.assertRaisesRegex(
+                        OSError, "directory or broken symlinks"
+                    ):
+                        sha256_tree(root)
 
 
 if __name__ == "__main__":
