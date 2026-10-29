@@ -1,165 +1,81 @@
 # System state
 
-## Source acceptance (2026-10-13)
+## Source maintenance checkpoint — 2026-10-29
 
-Observed published source: `main@67a60279435c459c51e127ecee78f13a2a380b91` (#562). Earlier sections are historical.
+Inspected baseline: [`main@471ff6c`](https://github.com/Chris0Jeky/agent-harness/commit/471ff6c92457986b30da1091eea8e4e67613896a),
+the merge of [#577](https://github.com/Chris0Jeky/agent-harness/pull/577). The canonical dispatcher
+reports **1.8.1**. This checkpoint measures source and reconciles issue state; it does not
+remeasure an installed home, native consumer, trust decision or live canary.
 
-| Surface | Accepted source | Limit |
+[ACTIVE](../plans/ACTIVE.md) owns the current work queue. [ROADMAP](../ROADMAP.md) owns remaining
+dependencies. All earlier status text, including dated runtime evidence, is preserved in the
+[October archive](archive/status-2026-10.md).
+
+## Source already on the baseline
+
+| Surface | Accepted source and evidence | Limit |
 |---|---|---|
-| Bundle/outcome stream | #541/#544 reject reproduced alias/metadata and malformed-stream cases | No concurrent-writer or multi-artifact crash-atomicity claim |
-| Regex evidence | #542 bounds pathological evaluation and refuses incomplete evidence | Cost-only refusal stays conservative |
-| Account attribution | #543 adds optional mutable metadata and bundle/fixture v3 | Kind/key remain identity; account is not authorization or a partition |
-| Operator/Pages source | #545 shares the check inventory; #546 repairs README and Pages source | Hosted rendering is a separate proof |
-| Canary chronology | #548 checks claimed start/latest observation against the candidate/genome cutoff | Immutable assignment remains #520/#517 |
-| Workspace scrub QA | #550 covers raw/JSON-escaped paths with a negative control | No universal redaction claim |
-| Replay publication | #555 privately stages streamed cache/report bytes and binds only caller parents | Existing target security is preserved; no multi-output transaction |
-| Sync identities | #559 checks selected source/live directories bidirectionally before backup/pruning | Native bind mounts/absent suffix lookup remain #523; walk cost #556 |
-| Replay input collisions | #560 checks named inputs, actual visited transcripts and other outputs before publication | Existing scanner coverage and concurrent-change limits remain |
-| SVG examples | #561 shows current 1.8.1 decisions under an explicit fictional wall posture and ordinary backups | Eight local frames verified; no host health/trust assertion |
-| Finite record JSON | #562 refuses NaN/Inf/computed overflow/non-JSON values; canonical byte pin refreshed | v3 fixture lock unchanged; non-string in-process key roundtrip remains #563 |
+| Learning and replay records | [#544](https://github.com/Chris0Jeky/agent-harness/pull/544) validates complete outcome streams; [#562](https://github.com/Chris0Jeky/agent-harness/pull/562) refuses nonfinite/non-JSON publication; [#565](https://github.com/Chris0Jeky/agent-harness/pull/565) adds recursive string-key validation and strict advisory-ledger JSONL. #558/#563 are closed. | Trusted ingestion, omitted-tail detection and event identity remain #511. The advisory ledger is distinct from the learning stream; its line size remains uncapped. |
+| Sync identity and cost | [#559](https://github.com/Chris0Jeky/agent-harness/pull/559) compares selected-tree identities in both directions; [#566](https://github.com/Chris0Jeky/agent-harness/pull/566) reuses snapshots within one preflight and retains fresh apply revalidation. #556 is closed. | Snapshots do not exclude concurrent writers. Real bind-mount integration remains #523. |
+| Replay publication | [#555](https://github.com/Chris0Jeky/agent-harness/pull/555) privately stages output and binds caller parents; [#560](https://github.com/Chris0Jeky/agent-harness/pull/560) checks named inputs, visited transcripts and fellow outputs. | Existing target security and scanner limits remain; no multi-output crash-atomicity claim. |
+| Canary chronology | [#548](https://github.com/Chris0Jeky/agent-harness/pull/548) excludes observations before the candidate/genome cutoff. | Labels and producer timestamps do not prove enrolled execution. #520/#517 retain the trusted backend boundary. |
+| Replay regressions | [#577](https://github.com/Chris0Jeky/agent-harness/pull/577) pins duplicate-decision and tree-symlink refusal behavior. | The later macOS acknowledgement failure is tracked in #578 and addressed by candidate #581. |
 
-Each source head has full local unit/smoke/style/compile proof and hosted checks. At #562:
-2,098 unit tests (75 skips), 2,473 smoke checks; platform/privilege skips remain explicit.
-Doctor exits 1: source 1.8.1 differs from installed 1.8.0 dispatcher/matrix bytes, and the
-worktree canonical comparison is unproven. No runtime upgrade masked that result.
+Verified merge receipts: #565 is `21b35d1012d4aa7ffca754bf58a6f8f6a0bea560`; #566 is
+`c2da76cf4912d4e379e93bfd6cfce8fb65abd890`. Both merged on 2026-10-14. They supersede the
+2026-10-13 pages' open claims for #556/#558/#563; their historical records remain intact.
 
-#539/#549 were closed as superseded by #559/#555; their original failures and review ceilings
-remain history. The older advisory outcome-ledger parsing gap is #558, distinct from the
-learning outcome stream and record validator. Synthetic old/new strict-verifier pairings pass
-for matching copies and refuse crossed validator bytes; no deployed adopter was inspected.
+## Reviewed maintenance work
 
-Installed hooks/Muse, trust/canaries, consumer adoption and private corpus qualification remain
-separate. [HUMAN_TODO.md](../HUMAN_TODO.md) retains H-18/H-19/H-22. Needed raw receipts/patches
-were preserved outside Git before owned-tree retirement; unrelated/primary files were preserved.
+The source PRs below have independent reviews with no confirmed findings. Windows CI on #580
+exposed collision-message and CRLF-fixture test assumptions; corrections preserve refusal
+and exact source-byte checks. Use each PR's current head, checks, review
+receipts and merge result when integrating; another branch's green suite does not prove that tree.
 
-> **Licence decision (2026-08-12):** Owner-authored repository content is now
-> `GPL-3.0-only`, with the curl-derived fixture retained under curl's licence.
-> See `LICENSE`, `LICENSING.md`, and `THIRD_PARTY_NOTICES.md`. This does not
-> decide the licences of possible future extracted plugin or replay products.
+| PR | Behavior under review | Remaining acceptance |
+|---|---|---|
+| [#579](https://github.com/Chris0Jeky/agent-harness/pull/579) | System comparisons become explicitly observational and emit no canary gate. Promotion consumers reject old system-run authority. Regression weighting and triage deduplication are corrected; compatibility bundle advances to v5. | #520/#517 need trusted assignment/execution/store evidence. #511 needs trusted ingestion offsets and event-ID/cursor migration. Follow the PR's archival-read and derived-data rebuild contract. |
+| [#580](https://github.com/Chris0Jeky/agent-harness/pull/580) | Bundle failures name recovery bytes and component/target mappings. Native name-only lookup checks absent destination and recovery spellings after identity/device preflight. | Carries #278's closure. #523 still needs a real disposable bind-mount integration result; the managed environment refused mount qualification. |
+| [#581](https://github.com/Chris0Jeky/agent-harness/pull/581) | Atomic fixture acknowledgement, honest POSIX group cleanup, isolated Windows supervisor startup, bounded regex replies/stderr and execution-contract identity. | Carries #578/#576's closure. Native CI supplies Windows/macOS/Linux evidence. |
+| [#582](https://github.com/Chris0Jeky/agent-harness/pull/582) | Tests own their fixture roots and match the Codex executable basename. | Local root suite: 2,114 tests, 68 skips; affected modules: 501 tests, seven skips. These results belong to #582's head. Native CI remains the platform gate. |
+| [#583](https://github.com/Chris0Jeky/agent-harness/pull/583) | Recorded 50-case replay lab, visual docs entry point and bounded public asset staging. The browser displays recorded comparisons. | 102 Python staging/link tests, four JavaScript tests and the native Pages build pass. Follow the PR for deployed browser verification; no live execution or canary claim. |
 
-Snapshot: 2026-09-02, published `main@d6392dd7959cd887bd83551bf43ddd53b96e97bf` (PR #260's merge `d6392dd`).
-Refresh Git, GitHub, deployed bytes, and live runtime evidence before relying on this snapshot.
+Operating contracts: [learning outcome validation](LEARNING_OUTCOME_VALIDATION.md),
+[replay output boundary](REPLAY_OUTPUT_BOUNDARY.md), [replay input errors](REPLAY_INPUT_ERRORS.md),
+[test fixture startup](TEST_FIXTURE_STARTUP.md), and [SPECS](../SPECS.md).
 
-Source state added 2026-09-07: `sync-global` has an opt-in, repeatable
-`--only claude-skill:<name>` lane for isolated Claude-native skill deployment. Synthetic fixture
-homes prove named-only scope, all-selection preflight, complete recovery backups, refusal of unknown
-destination paths and aliases, source staging/digest revalidation, late-save preservation through
-atomic directory moves, promotion-failure recovery, and unchanged default selection. The procedure
-does not claim lock-free writer exclusion. No live Claude home deployment is recorded by this source
-change. The same source slice implements #255's fix for future Codex skill
-syncs by placing their backups under the Codex backup root, outside recursive skill discovery, and
-refusing overlapping custom roots before writes. Existing legacy backup copies are deliberately
-untouched; no live-home cleanup or deployment is recorded here.
+## Runtime and human evidence
 
-**`templates/hooks/dispatch.py` moved four versions on 2026-09-02**, all through the PR lane with
-nine green checks and an independent adversarial review each: PR #257 upstreamed **1.6.29** (the
-owner's 2026-08-18 claude-config decisions 1.6.28/1.6.29, which had been authored in the consumer
-and left canonical trailing the deployed bytes — closed #59); PR #239 landed #201 as **1.6.30**
-(Git numeric booleans in the exact `--no-follow-tags` narrowing; #243 carries the two
-toolchain-dependent edges); PR #260 landed **1.6.31**, the owner's guide posture and the
-`FLOOR_ACK` double-check (SPECS §5.4; closes #26, #62, #259) plus the hardening of the 1.6.29
-carve-outs its reviews found. PR #238 landed #139's nested logical repo root in `harness.py` with
-its three review defects fixed (#258 tracks one LOW follow-up). The 2026-08-07/08 wave before it
-(PR #234, #237, #240) was documentation and tests only.
+**Historical observation, 2026-10-13:** Doctor reported source 1.8.1 versus installed 1.8.0
+and an unproven worktree canonical comparison. That observation is preserved in the archive;
+it is not a measurement of this session's runtime.
 
-One commit on `main` from this period did NOT arrive through the PR lane: `3ade22b`, which adds only
-`/.claude/worktrees` to `.gitignore`, was pushed directly by the worktree-isolation machinery. That
-direct push is what #236 tracks. PR #230's merge `7316241` and every merge above went through the
-normal lane.
+[HUMAN_TODO](../HUMAN_TODO.md) retains **H-18** (private Actions billing), **H-19** (PyPI trusted
+publisher) and **H-22** (adapter prerequisites and per-root trust/canaries, including extract-api
+and the other workstation). Its recorded deployment and canary history is dated evidence.
+A source merge, local invocation or static Doctor result cannot supply fresh-session runtime proof.
 
-## Runtime state: 2026-09-02
+The dispatcher remains feature-frozen under [BLUEPRINT](../BLUEPRINT.md). Source maintenance
+here does not extend its scope or complete the separate consumer rollout.
 
-Canonical source is **1.6.32** (PR #262 on #260's 1.6.31); the producer marker moved with each of
-1.6.29, 1.6.30, 1.6.31 and 1.6.32. Deployed bytes: claude-config `hooks/` (PR #196, byte-identical,
-its smoke 2361/2361) and the owner's `~/.claude/hooks` (hooks-only install with backup, digest
-`9bdb630e…` == canonical) are **1.6.32**. Runtime proof: the **Claude** canary trio passed live on
-2026-09-02 in the deploying session (SPECS §5.4: `rm -rf` outside the project denied once with a
-key and allowed when acknowledged; a dynamic redirect target allowed). The **Codex** exact-CWD
-`/hooks` re-trust and canaries are still owed — **H-15** in `HUMAN_TODO.md`. Nothing below is
-inferred from source merges.
+## Authority, products and canonical homes
 
-**2026-09-03, posture declared for claude-config.** On owner direction, claude-config's `tier.json`
-now declares `"floor_posture": "guide"` (its PR #197, merge `1594f9c`), overriding the wall its
-`sensitive_data` overlay defaulted to; `~/.claude`, a deployment checkout of that same repository,
-was fast-forwarded to it with the hook bytes staged identical to what was already on disk, so the
-live floor was never downgraded. Below the fail-closed `dispatcher error` deny, nothing in either
-surface is a wall now — the irreversible core and the `sensitive_data` public-remote refusal are
-acknowledgeable double-checks there. The runtime home is level on paper and **unproven in a real
-session**: a direct dispatcher canary is not evidence the runtime runs the hook. That proof is
-**H-16**, which is separately closable and does NOT close with H-15.
+The 2026-09-29 owner decision permits merges after exact-head checks, global law 2 review and
+the three-minute aging floor, using merge commits only. No squash. Re-read the declared tier
+before mutation; [SPECS](../SPECS.md) and the global laws own the gate.
 
-### Runtime state as recorded on 2026-08-07
+Owner-authored repository content is **GPL-3.0-only**, with the curl-derived fixture under its
+own licence ([LICENSING](../LICENSING.md), [third-party notices](../THIRD_PARTY_NOTICES.md)).
+The approved clean `charter-replay` extraction is **Apache-2.0**; its manifest is path-pinned by
+the 2026-10-04 decision. [REPLAY_TOOL_PRODUCT](../REPLAY_TOOL_PRODUCT.md) owns that scope;
+[blueprint-plugin extraction](../BLUEPRINT_PLUGIN_PRODUCT.md) remains deferred. Record any
+change of source direction before the harness and extracted product diverge.
 
-The owner explicitly lifted the 2026-08-02 PreTool pause and authorized rollout. PR #230 merged
-canonical source 1.6.27 and changed the agent-harness producer marker. Claude-config PR #127 merged
-the byte-identical consumer as `6aac87507c5afbb35da39f38628b880feb38921a`; both authoring and
-deployed checkouts are clean at that merge, the explicit `sync-global` dry run/apply were
-identity-only, and Doctor proves canonical == deployed 1.6.27 from clean published mains. Global
-Claude proof and the prior producer/three-consumer Codex canaries remain at 1.6.26 and are historical
-for the changed marker.
+Measurements live in [BENCHMARKS](BENCHMARKS.md); frozen-floor limits live in
+[FLOOR_LIMITATIONS](../FLOOR_LIMITATIONS.md). The [workspace receipt lab](ux-evaluation/WORKSPACE_RECEIPT_LAB.md)
+and [handoff profile](ux-evaluation/WORKSPACE_HANDOFF_PROFILE.md) are bounded reference contracts.
+Their synthetic evidence does not establish native adoption or authenticate external receipts.
 
-The remaining 1.6.27 proof is human-only and strictly ordered per SPECS §5: the agent-harness
-**producer** exact-CWD re-trust and both canary legs first, then fresh global Claude proof, and only
-then any consumer marker refresh. The three consumer marker PRs (EvidenceDeck #21,
-collaborative-hill-lab #5, SwarmingLilMen #52) were closed unmerged at that gate with their branches
-preserved. Issue #232 is the durable tracker; `plans/ACTIVE.md` carries the exact resume sequence.
-No agent may reorder those steps or infer any of them from static deployment or from Doctor.
-
-## Evidence vocabulary
-
-- **implemented**: executable code or an authoritative operating contract exists on `main`.
-- **deployed**: measured bytes or configuration exist at the runtime destination.
-- **benchmarked**: a recorded input, method, and numeric result exist; scope limits still apply.
-- **experimental**: usable for bounded internal evidence, not a production or compatibility promise.
-- **frozen**: intentionally preserved; feature expansion is outside the active lane.
-- **unverified**: a required observation has not been made or cannot be inferred from static proof.
-- **stale**: historically useful evidence that no longer describes current state.
-
-## Capability ledger
-
-**Source/deployment checkpoint (2026-10-01 quality integration):** producer floor source is
-1.7.3, with the source adapter's matching audit marker. The installed dispatcher remains 1.7.2;
-the clean primary checkout's doctor verified its byte identity before the producer update.
-No consumer marker or runtime trust state changed in this pass. H-14 still owns live trust/canaries,
-and 1.7.3 deployment waits on that gate. The older dated floor observations below are historical;
-they do not establish live execution of the new source. See `plans/ACTIVE.md` for the quality pass.
-
-| Capability | Outcome state | Direct evidence | Limitation and next executable handoff |
-|---|---|---|---|
-| Repository mission and authority | implemented | `AGENT_HARNESS_AGENT_BRIEF.md`; `.agent-harness/tier.json` declares T3, push free, merge free; PR #182 raised the unchanged aggregate Verify budget from 15 to 20 minutes and closed #179 | Authority can change; re-read every co-located tier declaration before mutation. #185 remains mapped; #186 is owned by the canonical `review-and-ship` skill in `claude-config`, not a harness runtime collector. |
-| Legacy deny-floor source | implemented, frozen; **core posture default since 1.7.0** (guide since 1.6.31) | **2026-09-28:** canonical `templates/hooks/dispatch.py` is **1.7.1**, normalized digest `9b98e3f845b386480cd04c45e8c553e8cacbfb61a9c4af14e9039ad302160c6f`. PR #363 (`a545fb9`) added the owner's `core` posture and made it the default below T4/wave for a non-sensitive repository; PR #372 (`f683e54`) hinted long-form and later rm flags. Measured against 1.6.33 over 3,000 real Bash commands at T3: denies fell from 270 (9.0%) to 95 (3.2%), with zero newly denied. Earlier: PR #262 merged `c34c74c`; canonical `templates/hooks/dispatch.py` reports 1.6.32 with normalized digest `9bdb630e77f55882373d38f9b9a0efc10ceae1c820a1adf16cef6ce89dc181f2`; 1.6.31 (PR #260, `d6392dd`), 1.6.29 (PR #257) and 1.6.30 (PR #239) precede it; the 1.6.27 valueless `push.followTags` repair and the 1.6.24 #184/#196 repairs remain; immutable `floor-v1-final` object `5a939540bdce51e511d6b3bae98358e3e2ad9148` still peels to the preserved 1.6.21 commit `02bd14cfe094f9b6af85b966de481ff3f45264cf` | The exception keeps `sensitive_data` active and grants only one exact public-synthetic remote/repository route with one explicit refspec, no configured `core.gitProxy`/`core.sshCommand` or declared-remote `receivepack`/`vcs`, and no command-line `--receive-pack`/`--exec`; it does not inspect Git content. The feature freeze resumes after this contract. 1.6.32 is deployed and Claude-proven; the Codex half of its rollout (H-15) and the runtime-home posture proof (H-16) are the open steps, and none of it is inferred from source merge. |
-| Shared Claude-hook floor | **deployed at 1.7.1 on 2026-09-28, unwired on this host** (floorless: only the Codex adapters in consumer roots call it): claude-config#461 merged `f0431b3`, a hooks-only install into `~/.claude/hooks` kept a backup (`.harness-backups/20260928T001538Z`, the 1.6.33 bytes), and `doctor` proves canonical == deployed; a direct invocation of the deployed file (not a runtime hook) denied `echo x > .env` once with a key and let `git push --force origin main` proceed (core). Earlier: Claude runtime-proven at 1.6.32 (live trio 2026-09-02); Codex runtime-proven at 1.6.26 | claude-config PR #196 merged the byte-identical 1.6.32 `hooks/` (its smoke 2361/2361); the hooks-only install into `~/.claude/hooks` kept a backup (`.harness-backups/20260902T182855Z`) and the deployed digest `9bdb630e…` equals canonical; the Claude canary trio passed live on 2026-09-02. The owner's consumer-side 1.6.28/1.6.29 (`4078905`/`3c6069e`, upstreamed by PR #257) and the following are historical: claude-config PR #127 merged the byte-identical 1.6.27 consumer as `6aac87507c5afbb35da39f38628b880feb38921a`; both clean `main` checkouts reached that merge, supported `sync-global` dry-run/apply were identity-only, and Doctor proves canonical == deployed with normalized digest `1cc8fb92090d972ae6daab01cf526301eb9ec24b9d1ccfaa24d655c7d403f343`. | **2026-09-28:** static deployment is at 1.7.1 (doctor: canonical == deployed); no runtime hook on this host calls it, so there is no runtime proof here. The Codex consumers' exact-CWD re-trust and canaries at 1.7.1 are H-14 (H-15 and H-16 closed 2026-09-07, floorless). Earlier: static deployment and the Claude runtime proof were complete at 1.6.32. |
-| Replay v0 / Policy Lab | implemented, benchmarked, experimental | PR #140 merged the core; PRs #159/#163 closed report and manifest defects; PRs #174/#176 closed #152/#156; PR #187 aligned surrogate schema/runtime behavior and closed #177; runs `30639136818`, `30642286808`, and `30660359254` passed | Internal evidence tool only. It is not a sandbox, global blocker, public repository, or universal policy language. Supported-engine proof used `jsonschema` 4.26.0 independently; the checked-in contract remains dependency-free. |
-| Audit and Doctor foundation | implemented, benchmarked, experimental | `harness.py audit` and `doctor`; PR #161 added static MCP topology diagnosis and closed #87; PRs #175/#178 closed shared-source identity and Docker command-position defects #164/#165; PR #204 closed #89 with static Windows Git command-fidelity diagnosis; PR #205 closed #189 with diagnosis-only static Claude-hook topology reporting; PR #212 closed #98 by requiring a clean published claude-config source before byte comparison (run `30731418878`, nine jobs passed); PR #219 closed #160 with selected disabled mixed-transport precedence (run `30759942880`, nine jobs passed). After PR #127 deployment Doctor reported canonical/deployed 1.6.27; since 2026-09-02 canonical and deployed are 1.6.32 (marker `9bdb630e…`). | Static inspection still cannot prove runtime trust; exact-CWD `/hooks` and canaries supply that separate evidence, and the three consumer markers remain on 1.6.26 until their own reviewed changes. |
-| Codex trust and linked-worktree guidance | implemented; 1.6.26 inventory proven | PRs #208/#209 establish the exact-CWD/root-checkout contracts. Agent-harness plus EvidenceDeck (`5be9d1d`), SwarmingLilMen (`56cff63`), and collaborative-hill-lab (`7565572`) each received an individual normal-TUI review/trust/enable sequence and fresh 1.6.26 allow/deny canaries. | H-2 remains closed for that dated inventory. The changed 1.6.27 producer marker and later consumer-marker changes inherit none of its proof and require the active exact-root rollout. |
-| Estate seed/sync/closeout operations | implemented, benchmarked, experimental | `seed`, `audit`, `doctor`, and backed-up `sync-global` are on `main`; PRs #162/#169/#180 established fail-closed closeout; PR #183 batched recovery reachability and closed #171; PR #194 made fingerprint expiry suspend-aware and closed #167; PR #197 retained direct non-commit `ORIG_HEAD` identity and closed #172; PR #198 skipped synthetic native-Windows executable-mode deltas while retaining POSIX mode-only drift and closed #170; PR #206 published the tailored new-repo contract and closed #131; runs `30655263274`, `30665083220`, `30670171402`, `30704657392`, and `30717285862` passed | The lease is cooperative, not process authentication. #188 awaits an owner-reviewed consumer manifest; #190 awaits a real generated launcher call site; #191/#192 remain queued. The bounded H-2 consumer rollout is complete; no unrelated estate cleanup ran. |
-| Pattern Guard v2 | implemented, unverified | PR #193 is a bounded AH-3 security-preservation exception; PR #200 closed #196 with five retained narrowing cases, and PR #202 restored fail-closed behavior for the unprovable sixth case; measured design inputs remain #21/#118/#120 | No general Pattern Guard v2 or shadow result exists. #201 is bounded fail-closed usability follow-up evidence, not authorization for universal-parser expansion. |
-| Integrated measurement | benchmarked, unverified; gate coverage now pinned | Historical and bounded correctness/CI measurements B-001 through B-014 in `docs/BENCHMARKS.md`. PR #240 closed #110: `_composable()` detects executable separators outside inert quoted spans instead of by raw substring, so the SPECS §6 flagship must-allow class is measured rather than dropped (`SMOKE_BENIGN_CORPUS` 416 → 459; swept `(case, shape)` pairs 107,699 → 111,342), and `CHARTER_RULE_DENY_PAIRS` pins 569 exact `(probe, shape)` pairs across 8 postures in place of nine aggregate integer floors | No current 1.6.27 estate baseline, continuous benchmark store, Doctor precision series, or task-completion metric is verified. The gate now measures 69 pre-existing over-blocks it previously could not see (#235); those are recorded, not fixed, and their `cmd-c` subset needs per-row dialect adjudication before it can support any #21 relaxation. |
-| Swarm outcome ledger | implemented, benchmarked, experimental | PR #354 (`59db399`) and PR #360 (`8434156`): `scripts/outcome_ledger.py` projects Muse swarm receipts and coordinator state into a deterministic JSONL ledger with a sealed hold-out; B-015 is its first live measurement (`docs/evals/OUTCOME_LEDGER.md`) | Verdicts are model-judge labels, not proof; the coordinator id rule is restated, not imported (AH-9). The ledger holds private claim text and lives under `%USERPROFILE%\.estate\outcome-ledger`, never in this public repository. |
-| Merge-gate model | implemented, experimental | PR #355 (`92d5795`) and PR #361 (`91a31b9`): `scripts/merge_gate_model.py` model-checks the global law 2 and 11 merge gate for every authority, in product with an event-driven observer (no illegal merge, round ceiling, bounded counters, no unbounded cycle, no trap, free-authority liveness); 16 seeded mutants; a conformance corpus with refusals (`docs/evals/MERGE_GATE_MODEL.md`) | A specification, not an enforcement point: claude-config #432's control plane must replay its corpus. One PR at a time; the refresh bound is a proposal. |
-| Claude-config integration | experimental, unverified | `CLAUDE_CONFIG_OPERATIONS.md`; AH-9 boundary; claude-config `hooks/dispatch.py` is at 1.6.32 (PR #196) | Private evidence stays private. The Codex half of the 1.6.32 rollout (H-15) is outstanding, as is H-16 — that repository declares `floor_posture: guide` since 2026-09-03 (its PR #197) and the runtime home inherited it, unproven in a real session. |
-| Public extraction and plugin products | frozen | `REPLAY_TOOL_PRODUCT.md` and `BLUEPRINT_PLUGIN_PRODUCT.md` are explicitly deferred under AH-10 | Do not create a public replay repository or extract a plugin until internal stability and demand are demonstrated and approved. |
-
-## Canonical homes and stale evidence
-
-- Mission: `AGENT_HARNESS_AGENT_BRIEF.md`.
-- Current state: this file.
-- Roadmap and issue ownership: `ROADMAP.md`.
-- Active work: `plans/ACTIVE.md`.
-- Measurements: `docs/BENCHMARKS.md`.
-- Legacy limitations: `FLOOR_LIMITATIONS.md`.
-- Human-action record: `HUMAN_TODO.md`; no H-2 action remains at this snapshot.
-- Root `HANDOFF.md` is a historical pre-pivot record. It is **stale** as current status and is
-  preserved rather than rewritten; dated continuation records live under `handoffs/`.
-
-## Refresh commands
-
-```powershell
-git fetch origin --prune
-git rev-parse origin/main
-git show-ref -d refs/tags/floor-v1-final
-py -3 harness.py doctor
-py -3 harness.py audit . --offline
-gh pr list --repo Chris0Jeky/agent-harness --state open
-gh issue list --repo Chris0Jeky/agent-harness --state open --limit 200
-```
+Evidence terms: **implemented** means accepted source exists; **deployed** means destination bytes
+were measured; **runtime-proven** requires the applicable live observations; **experimental**
+limits the compatibility claim; **historical** evidence applies only to its recorded date and scope.

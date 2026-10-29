@@ -127,7 +127,7 @@ When a PreTool floor is enabled, the supported bootstrap is the exact-CWD TUI pr
 
 Dry-run is the default. `--apply` backs up changed global guidance, shared Claude-home hook bytes, managed skill folders, and reviewed `codex/agents/*.toml` files before replacing them. Stale managed Codex agents are removed only when the deployed bytes still match the last harness-managed version. Default file sync refuses aliased homes, non-regular files, and destinations with multiple hard links, then publishes through a flushed sibling and a rename.
 
-`--only claude-skill:<name>` copies one skill from `<config-root>/skills/<name>` to `<claude-home>/skills/<name>`. `--only bundle:muse-runtime` reads schema 1 from `<config-root>/.agent-harness/sync-global.json` and deploys only the files that manifest names. Rollback is dry-run unless `--apply` is set, and it restores a component only while live and backup digests still match the receipt. Neither lane promises crash-atomic multi-file writes or exclusion of a concurrent writer. Remaining fault and platform notes are in [#278](https://github.com/Chris0Jeky/agent-harness/issues/278).
+`--only claude-skill:<name>` copies one skill from `<config-root>/skills/<name>` to `<claude-home>/skills/<name>`. `--only bundle:muse-runtime` reads schema 1 from `<config-root>/.agent-harness/sync-global.json` and deploys only the files that manifest names. Rollback is dry-run unless `--apply` is set, and it restores a component only while live and backup digests still match the receipt. [#580](https://github.com/Chris0Jeky/agent-harness/pull/580) adds recovery maps and checks native destination-name collisions. Neither lane promises crash-atomic multi-file writes or exclusion of a concurrent writer; real bind-mount qualification remains [#523](https://github.com/Chris0Jeky/agent-harness/issues/523).
 
 Future Codex skill backups go under `<codex-home>/backups/<timestamp>/skills/`, outside the skill root Codex scans. A backup tree that overlaps the skill home is refused. Legacy `<skills-home>/.harness-backups/` copies are left in place.
 
@@ -166,9 +166,9 @@ Dated write-ups lag that constant. Read them for evidence, then check the consta
 | File | Role | Snapshot it names |
 |---|---|---|
 | [`AGENT_HARNESS_AGENT_BRIEF.md`](AGENT_HARNESS_AGENT_BRIEF.md) | Mission: Policy Lab, Pattern Guard, Doctor, estate operations | Last reviewed 2026-07-30 |
-| [`plans/ACTIVE.md`](plans/ACTIVE.md) | Declared `status_doc`. At most two active workstreams, plus later owner decisions | Source checkpoint 2026-10-13; earlier sections are historical |
-| [`docs/SYSTEM_STATE.md`](docs/SYSTEM_STATE.md) | Capability ledger and evidence vocabulary | Source acceptance 2026-10-13; historical runtime records retained |
-| [`ROADMAP.md`](ROADMAP.md) | Dependencies and epic map AH-1 through AH-10 | Current dependency checkpoint 2026-10-13; epic map dated 2026-08-08 |
+| [`plans/ACTIVE.md`](plans/ACTIVE.md) | Declared `status_doc`, source maintenance and human gates | Checkpoint 2026-10-29; PR pages own current merge/check status |
+| [`docs/SYSTEM_STATE.md`](docs/SYSTEM_STATE.md) | Capability ledger and evidence vocabulary | Source checkpoint 2026-10-29; historical runtime records archived |
+| [`ROADMAP.md`](ROADMAP.md) | Remaining dependencies and evidence requirements | Checkpoint 2026-10-29; historical epic map archived |
 | [`HUMAN_TODO.md`](HUMAN_TODO.md) | Human gates | Open: H-18 (private-repo Actions billing), H-19 (PyPI trusted publisher for the replay extraction), H-22 (1.8.0 consumer re-trust and canaries) |
 | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Measured baselines and what they do not prove | Historical B-series |
 | [`docs/observability/AGENT_LOOP_SPANS.md`](docs/observability/AGENT_LOOP_SPANS.md) | Proposed span contract | No exporter, no merge gate |
