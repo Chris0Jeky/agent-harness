@@ -10,17 +10,18 @@ This record claims no installation, trust change, live canary or consumer adopti
 | Work | Source scope and remaining boundary |
 |---|---|
 | [#579](https://github.com/Chris0Jeky/agent-harness/pull/579) | Observational canary comparisons and corrected outcome weighting. Trusted assignment/execution evidence remains [#520](https://github.com/Chris0Jeky/agent-harness/issues/520); ingestion and event identity remain [#511](https://github.com/Chris0Jeky/agent-harness/issues/511). |
-| [#580](https://github.com/Chris0Jeky/agent-harness/pull/580) | Actionable bundle recovery maps and native lookup of absent path names; carries closure of [#278](https://github.com/Chris0Jeky/agent-harness/issues/278). Real bind-mount qualification remains [#523](https://github.com/Chris0Jeky/agent-harness/issues/523). |
+| [#580](https://github.com/Chris0Jeky/agent-harness/pull/580) | Actionable bundle recovery maps and native lookup of absent path names; carries closure of [#278](https://github.com/Chris0Jeky/agent-harness/issues/278). Native bind-mount proof passed in #587. |
 | [#581](https://github.com/Chris0Jeky/agent-harness/pull/581) | Replay cleanup, isolated startup and bounded regex worker evidence; carries closure of [#578](https://github.com/Chris0Jeky/agent-harness/issues/578) and [#576](https://github.com/Chris0Jeky/agent-harness/issues/576). Native platform checks own the remaining proof. |
 | [#582](https://github.com/Chris0Jeky/agent-harness/pull/582) | Portable smoke and Doctor test fixtures. Local root suite passes: 2,114 tests, 68 skips; native CI owns platform proof. |
-| [#583](https://github.com/Chris0Jeky/agent-harness/pull/583) | Interactive recorded replay lab and visual docs entry point. Python/JavaScript tests and the native Pages build pass; follow the PR for deployed browser verification. |
+| [#583](https://github.com/Chris0Jeky/agent-harness/pull/583) | Interactive recorded replay lab and visual docs entry point. Python/JavaScript tests, Pages deployment and desktop/mobile browser checks passed; see its deployed verification receipt. |
+| [#584](https://github.com/Chris0Jeky/agent-harness/pull/584) | Platform/quote-aware Doctor anchors and one shared canonical-reference probe; carries closure of [#78](https://github.com/Chris0Jeky/agent-harness/issues/78), including its wrapper-variable follow-up. |
+| [#587](https://github.com/Chris0Jeky/agent-harness/pull/587) | Real private bind-mount qualification: seven native CI tests passed with zero skips. Carries closure of [#523](https://github.com/Chris0Jeky/agent-harness/issues/523); full exact-head CI and merge receipts remain the acceptance gate. |
 
 #580's Windows CI exposed test assumptions about collision wording and CRLF fixture bytes.
 Its correction retains refusal and byte-preservation checks; follow the PR for the resulting head.
 
-The Doctor recognizer's platform/quote and reference-probe acceptance is tracked separately in
-[#78](https://github.com/Chris0Jeky/agent-harness/issues/78). The dispatcher remains frozen
-under [BLUEPRINT](../BLUEPRINT.md). Remaining source defects and parked consumer contracts are
+The dispatcher remains frozen under [BLUEPRINT](../BLUEPRINT.md).
+Remaining source defects and parked consumer contracts are
 mapped in [ROADMAP](../ROADMAP.md); [SYSTEM_STATE](../docs/SYSTEM_STATE.md) records proof limits.
 
 ## Backlog reconciliation
