@@ -296,7 +296,16 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
   fails that adapter closed and names it. A HOME-anchored wrapper path (`~/…`, `$HOME/…`,
   `$env:USERPROFILE/…`) names the same file from every cwd and certifies everywhere; only literal
   path components are allowed after the anchor, so a `$PWD`-style expansion cannot ride in behind
-  it. From the source root itself the same adapter certifies,
+  it. Dispatcher/interpreter bindings and invocation operands must use anchors the selected shell
+  expands: `$env:` is Windows-only; single-quoted or escaped anchors and quoted `~` fail closed.
+  POSIX assignment values may use bare `$HOME` or `~`, but variable expansions used as dispatcher
+  or wrapper operands must be one double-quoted word (including `"$wrapper"`). Windows dispatcher
+  and interpreter assignments use double quotes, concatenation, or `Join-Path`; wrapper assignment
+  paths must be quoted strings. Bare expanded variable arguments remain valid. Windows native
+  dispatcher/wrapper operands reject leading `~`: Doctor establishes neither the PowerShell
+  version nor the feature setting for [native tilde expansion](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_parsing#tilde).
+  POSIX bare `~` remains supported; its dispatcher paths and variable names preserve case.
+  From the source root itself the same adapter certifies,
   but the cwd dependency is still reported as an adapter-contract note, because it is a property
   of the adapter text rather than of the audit's cwd. The canonical `commandWindows` field and its
   official `command_windows` alias are equivalent; declaring both fails closed. `doctor --repo`
@@ -776,6 +785,9 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   conflict, while a same-table conflict remains malformed and a later re-enable fails closed. This
   is topology validation, not proof that Codex's full configuration loader accepts every inactive
   definition; it never renders arguments, mutates configuration, or probes runtime processes.
+  The harness checkout's canonical-reference status is probed once per invocation and reused by
+  both the global floor-version and vendored-byte checks, including an `UNPROVEN` result. These
+  checks share the command's probe deadline and honor `--offline`.
 - `harness.py worktree-lease --repo <linked-worktree> --action
   <status|acquire|renew|release> [--claimant <id>]` — manages the cooperative owner record stored
   in the linked worktree's Git administrative directory. Acquire requires absence, or
