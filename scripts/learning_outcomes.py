@@ -62,14 +62,21 @@ def events_from_experiences(records):
             continue
         first.setdefault(ident, record)
         feedback = record.get("feedback", ())
+        # A copied signal is one observation of one finding, even when its
+        # optional timestamp/key metadata differs. Different signals remain
+        # distinct; their refs do not establish which one supersedes another.
+        verdicts = Counter(
+            signal
+            for _, signal in {
+                (item["ref"], item["signal"])
+                for item in feedback
+                if item["kind"] == "triage_verdict"
+            }
+        )
         content = {
             "outcome": record["outcome"],
             "verdicts": {
-                signal: sum(
-                    item["kind"] == "triage_verdict" and item["signal"] == signal
-                    for item in feedback
-                )
-                for signal in ("confirmed", "refuted")
+                signal: verdicts[signal] for signal in ("confirmed", "refuted")
             },
             "corrections": sorted(
                 {
@@ -217,9 +224,16 @@ def posterior(events, repo, recipe):
             continue
         outcome = event["outcome"]
         alpha += event["verdicts"]["confirmed"] + (
-            outcome["immediate"] == "merged" and outcome["matured"] == "clean"
+            outcome["immediate"] == "merged"
+            and outcome["matured"] == "clean"
+            and event["success"]
         )
-        beta += event["verdicts"]["refuted"] + (outcome["matured"] == "reverted")
+        # One run supplies at most one negative outcome contribution. A known
+        # regression counts immediately, including before maturity, and a
+        # regressed/reverted merge must not count on both sides of the posterior.
+        beta += event["verdicts"]["refuted"] + (
+            outcome["matured"] == "reverted" or outcome["regression"] is True
+        )
     return alpha, beta
 
 

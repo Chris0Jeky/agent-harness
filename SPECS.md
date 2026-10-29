@@ -1253,8 +1253,13 @@ by `supersedes`. Only changes to `outcome`, triage `verdicts`, owner `correction
 the experience fold's refusal rules. `read_since` reads strictly after a durable cursor
 (`observed_at`, `id`), ordered by UTC instant then id, and returns the advanced cursor for replay.
 All three reducers consume the latest version per run: `posterior` gives the Muse coordinator's
-Beta(1 + confirmed + clean merges, 1 + refuted + reverted) per repo and recipe (a merge counts
-only after its 7-day maturity is known); `lesson_eligible` selects matured runs or runs with owner
+Beta(1 + confirmed + successful clean merges, 1 + refuted + reverted-or-regressed runs) per repo
+and recipe. A merge adds positive outcome evidence only after its 7-day maturity is known and
+`success` remains true. An explicit regression adds one negative outcome contribution immediately;
+a run that is both regressed and reverted still contributes only one. Within each run, duplicate
+triage signals are counted once per `(kind, ref, signal)`, including copies with different optional
+metadata; distinct refs or signals remain separate. Observational system-comparison precision uses
+the same deduplication. `lesson_eligible` selects matured runs or runs with owner
 corrections; `recurrences` finds correction or failure keys shared by more than one run. A late
 reversion replaces the earlier clean merge contribution in every consumer, rather than counting
 the run twice. `project <experiences...> [--out FILE]` writes JSONL (stdout by default), and
@@ -1263,7 +1268,9 @@ Projection is whole-history, and `observed_at` is the producer's clock, not an i
 observation that arrives later with an earlier `observed_at` renumbers the run's later versions on
 the next projection, and an incremental reader whose cursor is past it never sees it. Until the
 stream gains a log offset (#511), a consumer re-reads the whole stream (the reducers are cheap and
-deterministic) rather than trusting a cursor across a re-projection.
+deterministic) rather than trusting a cursor across a re-projection. After changing the projection's
+deduplication policy, rebuild from the complete experience history and replace the derived stream;
+old events contain aggregate verdict counts and cannot be deduplicated without those observations.
 
 **Retiring a consolidated single** (cc#835). `probation -> merged` joins `evaluating -> merged`
 and `candidate -> merged`, so a single (typically a protected P1 owner correction) that reached

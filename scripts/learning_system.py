@@ -27,7 +27,7 @@ _SPEC = importlib.util.spec_from_file_location(
 contracts = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(contracts)
 
-TOOL = "agent-harness:scripts/learning_system.py@3"
+TOOL = "agent-harness:scripts/learning_system.py@4"
 DEFAULT_POLICY = {
     "min_runs": 20,
     "min_matured": 10,
@@ -55,10 +55,13 @@ def arm(runs):
     matured = [r for r in runs if r["outcome"]["matured"] is not None]
     regression = [r for r in runs if r["outcome"]["regression"] is not None]
     signals = [
-        f["signal"]
+        signal
         for r in runs
-        for f in r.get("feedback", ())
-        if f["kind"] == "triage_verdict"
+        for _, signal in {
+            (f["ref"], f["signal"])
+            for f in r.get("feedback", ())
+            if f["kind"] == "triage_verdict"
+        }
     ]
     confirmed, refuted = signals.count("confirmed"), signals.count("refuted")
     corrected = [

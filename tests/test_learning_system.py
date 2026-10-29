@@ -126,6 +126,14 @@ class CompareTests(unittest.TestCase):
         report = self.compare(arms(cand_corrections=1))
         self.assertTrue(any("owner corrections rose" in r for r in report["reasons"]))
 
+    def test_repeated_triage_verdicts_do_not_inflate_an_arm(self):
+        runs = arms()
+        for record in runs:
+            record["feedback"].append(copy.deepcopy(record["feedback"][0]))
+        report = self.compare(runs)
+        for side in ("baseline", "candidate"):
+            self.assertEqual(report["arms"][side]["confirmed"], 20)
+
     def test_tolerances_are_the_policy(self):
         report = self.compare(
             arms(cand_reverts=1),
