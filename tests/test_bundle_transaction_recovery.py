@@ -143,9 +143,11 @@ class BundleTransactionRecoveryTests(unittest.TestCase):
                 self.assertEqual(before_source, harness.tree_digest(config))
                 message = str(caught.exception)
                 self.assertIn(
-                    "copy restore failure"
-                    if restore_fails
-                    else "staged promotion failure",
+                    (
+                        "copy restore failure"
+                        if restore_fails
+                        else "staged promotion failure"
+                    ),
                     message,
                 )
                 self.assertIn(f"recovery backups: {run}", message)
