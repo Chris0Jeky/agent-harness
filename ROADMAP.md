@@ -17,8 +17,6 @@ counts and open/closed labels are historical, not a current backlog inventory.
 |---|---|
 | Trusted learning evidence — [#520](https://github.com/Chris0Jeky/agent-harness/issues/520), [#517](https://github.com/Chris0Jeky/agent-harness/issues/517) | Immutable cohort assignment, executed-genome receipts, store import times, beacon selection and destination install verification need a trusted backend. #579 makes comparisons observational while that evidence is absent. |
 | Outcome ingestion — [#511](https://github.com/Chris0Jeky/agent-harness/issues/511) | Trusted append-only ingestion/offsets, omitted-tail detection and stable event-ID/cursor migration remain. #579 addresses regression weighting and triage deduplication; it does not complete the stream's provenance boundary. |
-| Native sync qualification — [#523](https://github.com/Chris0Jeky/agent-harness/issues/523) | #580 addresses absent-name lookup. Prove source/recovery refusal before artifacts in a disposable real bind-mount fixture, with disjoint success controls. Observed identities do not exclude concurrent writers. |
-| Doctor recognizer — [#78](https://github.com/Chris0Jeky/agent-harness/issues/78) | Active implementation: platform/quote-aware dispatcher/interpreter anchors, with accepted adapter controls. The issue also records unquoted wrapper-variable use and duplicate canonical-reference probing; retain their acceptance explicitly. |
 | Frozen dispatcher follow-ups — [#107](https://github.com/Chris0Jeky/agent-harness/issues/107), [#225](https://github.com/Chris0Jeky/agent-harness/issues/225) | Remote diagnostics still cross-contaminate. Publication parity still differs for explicit null, SSH ports and duplicate identical push rows. Any change needs its own bounded freeze-compliant scope and proof. |
 | Numeric parity — [#201](https://github.com/Chris0Jeky/agent-harness/issues/201), [#243](https://github.com/Chris0Jeky/agent-harness/issues/243) | #239 shipped the portable numeric core. The documented toolchain-dependent cases remain fail-closed; full numeric parity is not complete. |
 | Consumer smoke — [#185](https://github.com/Chris0Jeky/agent-harness/issues/185) | #217 shipped flushed producer progress. A real consumer launcher/manifest must define bounded conformance, interruption and cleanup. PID/start-time checks or taskkill alone do not prove descendant ownership. |
@@ -34,10 +32,20 @@ The earlier #556/#558/#563 follow-ups are closed by merged
 [#565](https://github.com/Chris0Jeky/agent-harness/pull/565). Keep their completed source work
 out of the active queue; concurrent-writer exclusion and ledger input-size limits were not claimed.
 
+## Source acceptance receipts
+
+Native sync qualification is implemented in [#587](https://github.com/Chris0Jeky/agent-harness/pull/587):
+seven required native tests passed, covering alias refusal and a disjoint success control.
+[#580](https://github.com/Chris0Jeky/agent-harness/pull/580) owns absent-name lookup and recovery maps.
+[#584](https://github.com/Chris0Jeky/agent-harness/pull/584) owns the Doctor shell anchors,
+wrapper quoting and single reference probe. Their current full CI and merge receipts own
+acceptance for #523, #278 and #78; these are no longer unimplemented source dependencies.
+Observed identities still do not exclude concurrent writers, and static Doctor does not prove trust.
+
 ## Outcome ordering
 
 1. Integrate reviewed source changes only after their exact-head native checks and merge gate
-   are satisfied. #579/#580/#581/#582/#583 carry the current bounded maintenance work.
+   are satisfied. [ACTIVE](plans/ACTIVE.md) links the bounded maintenance PRs and their proof.
 2. Build trust or portability interfaces from concrete evidence and consumers. Keep diagnosis,
    source acceptance and runtime activation independently evidenced.
 3. Preserve the dispatcher freeze in [BLUEPRINT](BLUEPRINT.md); use measured failures and the
