@@ -16,7 +16,7 @@ published are pointed at GitHub. No Jekyll plugin rewrites links (the
 small block scanner (fences, indented code, blockquotes, list items, multi-line
 code spans), so links inside code are left exactly as written.
 
-Look: the site's own theme (a layout and one stylesheet in `scripts/docs_site`) is copied into the staged
+Look: the site's own theme (layout, stylesheet and lab script in `scripts/docs_site`) is copied into the staged
 site, and `_data/docs_nav.yml` carries the top navigation and the sidebar groups the layout renders. Every
 page names `layout: default`; no navigation is written into page bodies.
 
@@ -82,6 +82,7 @@ DENIED_DIRS = ("handoffs", "plans", *EXCLUDED_DIRS)
 # (label, staged page) for the top navigation.
 NAV = (
     ("Home", "index.md"),
+    ("Replay lab", "docs/POLICY_LAB.md"),
     ("Blueprint", "BLUEPRINT.md"),
     ("Specs", "SPECS.md"),
     ("Book", "BOOK.md"),
@@ -90,7 +91,17 @@ NAV = (
 )
 # The theme: copied as-is from THEME_DIR into the staged site, after the same input checks as every document.
 THEME_DIR = "scripts/docs_site"
-THEME_FILES = ("_layouts/default.html", "assets/css/docs.css")
+THEME_FILES = (
+    "_layouts/default.html",
+    "assets/css/docs.css",
+    "assets/js/replay-lab.js",
+)
+# Explicit public assets only. Never sweep a reports/ or assets/ directory.
+REPLAY_REPORT = "examples/toy-guard/report/report.json"
+PUBLIC_ASSETS = {
+    "docs/assets/policy-workflow.svg": "docs/assets/policy-workflow.svg",
+    REPLAY_REPORT: "assets/data/toy-guard-report.json",
+}
 NAV_DATA = "_data/docs_nav.yml"
 SITE_LICENSE = "GPL-3.0-only"
 ROOT_GROUP = "Overview"
@@ -505,6 +516,9 @@ def link_target(raw, src_rel, root, staged, image):
         )
     if resolved == ".." or resolved.startswith("../"):
         return None
+    if resolved in PUBLIC_ASSETS:
+        here = posixpath.dirname(staged[src_rel])
+        return quote(relative_path(here, PUBLIC_ASSETS[resolved]), safe="/") + suffix
     if resolved in staged:
         here = posixpath.dirname(staged[src_rel])
         page = relative_path(here, html_name(staged[resolved]))
@@ -745,6 +759,34 @@ def read_source(path):
         raise BuildError(f"not valid UTF-8: {path}") from exc
 
 
+def public_assets(root):
+    """Read named assets before any output mutation; only the published fixture provenance is public."""
+    assets = {}
+    for source, dest in PUBLIC_ASSETS.items():
+        check_not_denied(source)
+        validate_source(root, source)
+        text = read_source(root / source)
+        if source == REPLAY_REPORT:
+            try:
+                report = json.loads(text)
+                rows = report["results"]
+                if not isinstance(rows, list) or not rows:
+                    raise ValueError("missing replay cases")
+                for row in rows:
+                    if (
+                        row["event"]["source"]
+                        not in {"synthetic", "historical-redacted"}
+                        or row["case"]["provenance"] != row["event"]["source"]
+                    ):
+                        raise ValueError("non-public replay case")
+            except (ValueError, KeyError, TypeError) as exc:
+                raise BuildError(
+                    "replay lab requires the allowlisted public fixture report"
+                ) from exc
+        assets[dest] = text
+    return assets
+
+
 def build(out, root=REPO_ROOT):
     """Stage the site into `out`; return the staged page paths (not the config, navigation data or theme)."""
     root = Path(root).resolve()
@@ -754,7 +796,8 @@ def build(out, root=REPO_ROOT):
     for rel in theme_paths:
         validate_source(root, rel)
     theme = {name: read_source(root / THEME_DIR / name) for name in THEME_FILES}
-    out = check_output_path(Path(out), root, [*sources, *theme_paths])
+    assets = public_assets(root)
+    out = check_output_path(Path(out), root, [*sources, *theme_paths, *PUBLIC_ASSETS])
     staged_map = sources
     rendered = {}
     pages = []
@@ -775,7 +818,7 @@ def build(out, root=REPO_ROOT):
         dest = out / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(text.encode("utf-8"))
-    extras = {"_config.yml": CONFIG, NAV_DATA: nav_data(pages), **theme}
+    extras = {"_config.yml": CONFIG, NAV_DATA: nav_data(pages), **theme, **assets}
     for rel, text in sorted(extras.items()):
         dest = out / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -797,6 +840,8 @@ class LinkCollector(HTMLParser):
                 ("a", "href"),
                 ("img", "src"),
                 ("link", "href"),
+                ("script", "src"),
+                ("script", "data-replay-report"),
             ):
                 self.links.append(value)
 

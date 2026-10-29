@@ -87,5 +87,8 @@
       list.parentNode.hidden = false;
     })();
   </script>
+  {% if page.source_path == "docs/POLICY_LAB.md" %}
+  <script defer src="{{ '/assets/js/replay-lab.js' | relative_url }}" data-replay-report="{{ '/assets/data/toy-guard-report.json' | relative_url }}"></script>
+  {% endif %}
 </body>
 </html>

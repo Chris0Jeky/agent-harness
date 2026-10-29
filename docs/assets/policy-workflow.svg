@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 320" role="img" aria-labelledby="title desc">
+  <title id="title">From policy to evidence</title>
+  <desc id="desc">Declare the tier and posture. Inspect wiring with doctor and audit. Replay baseline and candidate against a pinned corpus. Review the changes before deployment. Static inspection and replay do not establish live runtime enforcement.</desc>
+  <defs>
+    <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#101b35"/><stop offset="1" stop-color="#1c3155"/></linearGradient>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 8 4 0 8" fill="none" stroke="#83a8e8" stroke-width="1.5"/></marker>
+  </defs>
+  <style>
+    text { font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; }
+    .step { fill: #f5f8ff; font-size: 19px; font-weight: 650; }
+    .detail { fill: #bacbe7; font-size: 12px; }
+    .num { fill: #83dabd; font-size: 12px; font-weight: 700; letter-spacing: 2px; }
+    .flow { stroke-dasharray: 5 7; animation: travel 2.4s linear infinite; }
+    @keyframes travel { to { stroke-dashoffset: -24; } }
+    @media (prefers-reduced-motion: reduce) { .flow { animation: none; } }
+  </style>
+  <rect width="960" height="320" rx="20" fill="url(#bg)"/>
+  <text x="32" y="39" fill="#a8bfe7" font-size="11" font-weight="700" letter-spacing="2.5">AGENT HARNESS / THE EVIDENCE LOOP</text>
+  <text x="32" y="76" fill="#ffffff" font-size="26" font-weight="650">Make the policy inspectable.</text>
+  <g stroke="#385277" fill="#1c2c49">
+    <rect x="32" y="108" width="195" height="126" rx="12"/>
+    <rect x="266" y="108" width="195" height="126" rx="12"/>
+    <rect x="500" y="108" width="195" height="126" rx="12"/>
+    <rect x="734" y="108" width="194" height="126" rx="12"/>
+  </g>
+  <g stroke="#83a8e8" stroke-width="2" fill="none" marker-end="url(#arrow)">
+    <path class="flow" d="M233 171h24"/><path class="flow" d="M467 171h24"/><path class="flow" d="M701 171h24"/>
+  </g>
+  <text class="num" x="48" y="136">01 / DECLARE</text><text class="step" x="48" y="168">Set the boundary</text>
+  <text class="detail" x="48" y="192">Tier · posture · sensitivity</text><text class="detail" x="48" y="212">What can this repo lose?</text>
+  <text class="num" x="282" y="136">02 / INSPECT</text><text class="step" x="282" y="168">Check reality</text>
+  <text class="detail" x="282" y="192">doctor + audit</text><text class="detail" x="282" y="212">Declaration meets wiring.</text>
+  <text class="num" x="516" y="136">03 / COMPARE</text><text class="step" x="516" y="168">Replay the change</text>
+  <text class="detail" x="516" y="192">Same corpus · two policies</text><text class="detail" x="516" y="212">Inspect every changed case.</text>
+  <text class="num" x="750" y="136">04 / REVIEW</text><text class="step" x="750" y="168">Decide with proof</text>
+  <text class="detail" x="750" y="192">Checks · independent review</text><text class="detail" x="750" y="212">Live canaries after trust.</text>
+  <path d="M830 244v20H130v-20" fill="none" stroke="#52729f" stroke-width="1.5"/>
+  <text x="480" y="292" fill="#bacbe7" font-size="12" text-anchor="middle">Measure → inspect the evidence → revise. A replay result is not a live enforcement claim.</text>
+</svg>

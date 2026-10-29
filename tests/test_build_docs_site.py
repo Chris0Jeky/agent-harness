@@ -38,6 +38,7 @@ def make_repo(root, readme=None, extra=None):
         write(root, name, f"# Title of {name}\n\nBody of {name}.\n")
     write(root, "README.md", readme or "# agent-harness\n\nHello.\n")
     write(root, "docs/GUIDE.md", "# The Guide\n\nGuide body.\n")
+    write(root, "docs/POLICY_LAB.md", "# Replay lab\n\nRecorded synthetic examples.\n")
     write(root, "docs/evals/TAXONOMY.md", "# Eval Taxonomy\n\nTaxonomy.\n")
     write(root, "docs/archive/OLD.md", "# Old stuff\n")
     write(root, "docs/superpowers/SCRATCH.md", "# Scratch\n")
@@ -67,6 +68,8 @@ def make_repo(root, readme=None, extra=None):
         write(root, f"{site.THEME_DIR}/{name}", theme)
     for rel, text in (extra or {}).items():
         write(root, rel, text)
+    for rel in getattr(site, "PUBLIC_ASSETS", {}):
+        write(root, rel, (ROOT / rel).read_text(encoding="utf-8"))
     return root
 
 
@@ -201,6 +204,35 @@ class StageBase(unittest.TestCase):
 
 
 class StageTests(StageBase):
+    def test_replay_lab_publishes_only_named_assets_and_rebases_links(self):
+        write(
+            self.root,
+            "README.md",
+            "# agent-harness\n\n![Workflow](docs/assets/policy-workflow.svg)\n"
+            "[Recorded report](examples/toy-guard/report/report.json)\n",
+        )
+        write(self.root, "docs/assets/private.json", '{"private": true}')
+        git_track_all(self.root)
+        self.build()
+        self.assertTrue((self.out / "docs/assets/policy-workflow.svg").is_file())
+        self.assertTrue((self.out / "assets/data/toy-guard-report.json").is_file())
+        self.assertFalse((self.out / "docs/assets/private.json").exists())
+        self.assertIn("docs/assets/policy-workflow.svg", self.page("index.md"))
+        self.assertIn("assets/data/toy-guard-report.json", self.page("index.md"))
+        self.assertNotIn("raw.githubusercontent.com", self.page("index.md"))
+
+    def test_replay_lab_refuses_non_public_data_before_replacing_output(self):
+        report = json.loads(
+            (ROOT / "examples/toy-guard/report/report.json").read_text(encoding="utf-8")
+        )
+        report["results"][0]["event"]["source"] = "private-transcript"
+        write(self.root, "examples/toy-guard/report/report.json", json.dumps(report))
+        write(self.out, site.MARKER, site.MARKER_TEXT)
+        write(self.out, "keep.txt", "prior successful build")
+        with self.assertRaisesRegex(site.BuildError, "public fixture"):
+            self.build()
+        self.assertEqual(self.page("keep.txt"), "prior successful build")
+
     def test_readme_becomes_index_without_an_inline_nav_line(self):
         self.build()
         index = self.page("index.md")
@@ -233,6 +265,7 @@ class StageTests(StageBase):
             nav["top"],
             [
                 ("Home", "/"),
+                ("Replay lab", "/docs/POLICY_LAB.html"),
                 ("Blueprint", "/BLUEPRINT.html"),
                 ("Specs", "/SPECS.html"),
                 ("Book", "/BOOK.html"),
@@ -248,7 +281,13 @@ class StageTests(StageBase):
             groups["Overview"][0], ("agent-harness", "/")
         )  # the index leads its group
         self.assertIn(("Title of SPECS.md", "/SPECS.html"), groups["Overview"])
-        self.assertEqual(groups["Docs"], [("The Guide", "/docs/GUIDE.html")])
+        self.assertEqual(
+            groups["Docs"],
+            [
+                ("The Guide", "/docs/GUIDE.html"),
+                ("Replay lab", "/docs/POLICY_LAB.html"),
+            ],
+        )
         self.assertEqual(
             groups["Evals"], [("Eval Taxonomy", "/docs/evals/TAXONOMY.html")]
         )
@@ -1249,6 +1288,28 @@ class BuiltSiteCheckTests(unittest.TestCase):
         )
         self.assertEqual(problems, [])
 
+    def test_missing_script_and_replay_data_are_reported(self):
+        problems = self.check_files(
+            {
+                "index.html": '<script src="assets/missing.js" '
+                'data-replay-report="assets/missing.json"></script>',
+            }
+        )
+        self.assertEqual(len(problems), 2)
+        self.assertTrue(any("assets/missing.js" in p for p in problems))
+        self.assertTrue(any("assets/missing.json" in p for p in problems))
+
+    def test_existing_scripts_and_replay_data_are_valid(self):
+        problems = self.check_files(
+            {
+                "docs/LAB.html": '<script src="../assets/lab.js" '
+                'data-replay-report="/agent-harness/assets/data.json"></script>',
+                "assets/lab.js": "void 0;",
+                "assets/data.json": "{}",
+            }
+        )
+        self.assertEqual(problems, [])
+
     def test_broken_and_unrebased_links_are_reported(self):
         problems = self.check_files(
             {
@@ -1316,7 +1377,13 @@ class WorkflowTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "pages.yml").read_text(
             encoding="utf-8"
         )
-        for path in ("scripts/build_docs_site.py", "scripts/docs_site/**"):
+        for path in (
+            "scripts/build_docs_site.py",
+            "scripts/docs_site/**",
+            "examples/toy-guard/report/**",
+            "tests/docs_site/**",
+            "tests/test_build_docs_site.py",
+        ):
             self.assertEqual(workflow.count(f'      - "{path}"\n'), 2, path)
 
 
@@ -1326,7 +1393,13 @@ class RealRepositoryTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, out, True)
         staged = site.build(out, root=ROOT)
         tree = read_tree(out)
-        extras = {"_config.yml", site.NAV_DATA, site.MARKER, *site.THEME_FILES}
+        extras = {
+            "_config.yml",
+            site.NAV_DATA,
+            site.MARKER,
+            *site.THEME_FILES,
+            *site.PUBLIC_ASSETS.values(),
+        }
         self.assertEqual(set(staged) | extras, set(tree))
         self.assertIn("index.md", tree)
         self.assertIn("docs-index.md", tree)
