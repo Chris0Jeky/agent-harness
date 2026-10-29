@@ -802,7 +802,7 @@ class HarnessTests(unittest.TestCase):
         dispatcher = claude_home / "hooks" / "dispatch.py"
         aliases = (
             "python ~/.claude/hooks/dispatch.py --event pre",
-            "python $HOME/.claude/hooks/dispatch.py --event pre",
+            'python "$HOME/.claude/hooks/dispatch.py" --event pre',
             "python ${HOME}/.claude/hooks/dispatch.py --event pre",
         )
         with mock.patch.object(Path, "home", return_value=fake_home):
@@ -2512,7 +2512,7 @@ class HarnessTests(unittest.TestCase):
             {
                 "type": "prompt",
                 "command": (
-                    "python $HOME/.claude/hooks/dispatch.py "
+                    'python "$HOME/.claude/hooks/dispatch.py" '
                     "--event pre --runtime codex"
                 ),
             },
@@ -5328,7 +5328,10 @@ allow_local_binding = true
         # instead of reporting zero valid floor handlers.
         pin = "a" * 64
         cases = (
-            ("~/work/repo/invoke_deny_floor.sh", "~/work/repo/invoke_deny_floor.ps1"),
+            (
+                "~/work/repo/invoke_deny_floor.sh",
+                '"$env:USERPROFILE/work/repo/invoke_deny_floor.ps1"',
+            ),
             (
                 # POSIX: quoted, because an unquoted expansion is field-split.
                 '"$HOME/work/repo/invoke_deny_floor.sh"',
@@ -5364,7 +5367,7 @@ allow_local_binding = true
                                         f"expected={pin}; "
                                         "dispatcher=$HOME/.claude/hooks/dispatch.py; "
                                         "w=$HOME/work/repo/invoke_deny_floor.sh; "
-                                        "/bin/sh $w"
+                                        '/bin/sh "$w"'
                                     ),
                                     "commandWindows": (
                                         f"$expected='{pin}'; "
@@ -5424,7 +5427,7 @@ allow_local_binding = true
         )
         self.assertTrue(
             harness.value_binds_anchored_floor_path(
-                value, reject_relative_wrapper=True, windows=True
+                f'"{value}"', reject_relative_wrapper=True, windows=True
             )
         )
         self.assertFalse(
@@ -5433,18 +5436,19 @@ allow_local_binding = true
         self.assertTrue(
             harness.token_is_wrapper(value, set(), reject_relative=True, windows=True)
         )
-        # `$HOME` and `~` expand in both shells, so they are accepted on both.
-        for portable in (
-            "$HOME/work/repo/invoke_deny_floor.sh",
-            "~/work/repo/invoke_deny_floor.sh",
+        # POSIX assignment anchors expand without quotes. PowerShell requires
+        # a string expression and does not certify native tilde expansion.
+        for portable, windows in (
+            ("$HOME/work/repo/invoke_deny_floor.sh", False),
+            ("~/work/repo/invoke_deny_floor.sh", False),
+            ('"$HOME/work/repo/invoke_deny_floor.ps1"', True),
         ):
-            for windows in (False, True):
-                with self.subTest(value=portable, windows=windows):
-                    self.assertTrue(
-                        harness.value_binds_anchored_floor_path(
-                            portable, reject_relative_wrapper=True, windows=windows
-                        )
+            with self.subTest(value=portable, windows=windows):
+                self.assertTrue(
+                    harness.value_binds_anchored_floor_path(
+                        portable, reject_relative_wrapper=True, windows=windows
                     )
+                )
 
     def test_a_single_quoted_home_anchor_never_expands(self) -> None:
         # Single quotes suppress expansion in BOTH sh and PowerShell, so the
@@ -5551,7 +5555,7 @@ allow_local_binding = true
                 # PowerShell variables really are case-insensitive.
                 self.assertTrue(
                     harness.value_binds_anchored_floor_path(
-                        value, reject_relative_wrapper=True, windows=True
+                        f'"{value}"', reject_relative_wrapper=True, windows=True
                     ),
                     value,
                 )
@@ -5585,7 +5589,7 @@ allow_local_binding = true
                                     "command": (
                                         f"expected={pin}; "
                                         "dispatcher=$HOME/.claude/hooks/dispatch.py; "
-                                        "w=.codex/invoke_deny_floor.sh; /bin/sh $w"
+                                        'w=.codex/invoke_deny_floor.sh; /bin/sh "$w"'
                                     ),
                                     "commandWindows": (
                                         f"$expected='{pin}'; "
@@ -5609,23 +5613,19 @@ allow_local_binding = true
         )
 
     def test_reject_relative_wrapper_drops_only_the_wrapper_shape(self) -> None:
-        # Guards the composition of the two pattern tuples: dropping the wrapper
-        # must not quietly drop the home/system-anchored shapes with it.
-        self.assertEqual(
-            len(harness._FLOOR_VALUE_PATTERNS),
-            len(harness._CWD_INDEPENDENT_FLOOR_VALUE_PATTERNS) + 1,
-        )
+        # Dropping relative wrappers must preserve every platform's supported
+        # home/system-anchored value forms.
         cwd_independent = (
-            "$HOME/.claude/hooks/dispatch.py",
-            "$env:USERPROFILE+'/.claude/hooks/dispatch.py'",
-            "$env:SYSTEMROOT/py.exe",
+            ("$HOME/.claude/hooks/dispatch.py", False),
+            ("$env:USERPROFILE+'/.claude/hooks/dispatch.py'", True),
+            ('"$env:SYSTEMROOT/py.exe"', True),
         )
-        for value in cwd_independent:
+        for value, windows in cwd_independent:
             with self.subTest(value=value):
                 for reject in (False, True):
                     self.assertTrue(
                         harness.value_binds_anchored_floor_path(
-                            value, reject_relative_wrapper=reject
+                            value, reject_relative_wrapper=reject, windows=windows
                         ),
                         value,
                     )
@@ -5759,7 +5759,7 @@ allow_local_binding = true
                 {
                     "type": "command",
                     "command": (
-                        "python $HOME/.claude/hooks/dispatch.py "
+                        'python "$HOME/.claude/hooks/dispatch.py" '
                         "--event pre --runtime codex"
                     ),
                     "commandWindows": (
@@ -5947,7 +5947,7 @@ allow_local_binding = true
         handler = {
             "type": "command",
             "command": (
-                "python $HOME/.claude/hooks/dispatch.py --event pre --runtime codex"
+                'python "$HOME/.claude/hooks/dispatch.py" --event pre --runtime codex'
             ),
             "commandWindows": "Write-Output floor-disabled",
         }
@@ -5971,7 +5971,7 @@ allow_local_binding = true
         valid = {
             "type": "command",
             "command": (
-                "python $HOME/.claude/hooks/dispatch.py --event pre --runtime codex"
+                'python "$HOME/.claude/hooks/dispatch.py" --event pre --runtime codex'
             ),
             "commandWindows": (
                 "py -3 $env:USERPROFILE/.claude/hooks/dispatch.py "
@@ -6008,7 +6008,7 @@ allow_local_binding = true
         floor = {
             "type": "command",
             "command": (
-                f"expected={pin}; python $HOME/.claude/hooks/dispatch.py "
+                f'expected={pin}; python "$HOME/.claude/hooks/dispatch.py" '
                 "--event pre --runtime codex"
             ),
             "commandWindows": (
@@ -6051,7 +6051,7 @@ allow_local_binding = true
     def test_repo_floor_rejects_commented_and_chained_markers(self) -> None:
         pin = "e" * 64
         marker = (
-            "python $HOME/.claude/hooks/dispatch.py "
+            'python "$HOME/.claude/hooks/dispatch.py" '
             f"--event pre --runtime codex expected={pin}"
         )
         carriers = (
@@ -6082,7 +6082,7 @@ allow_local_binding = true
     def test_repo_floor_rejects_posix_invocation_control_operators(self) -> None:
         pin = "1" * 64
         invocation = (
-            "python $HOME/.claude/hooks/dispatch.py " "--event pre --runtime codex"
+            'python "$HOME/.claude/hooks/dispatch.py" ' "--event pre --runtime codex"
         )
         windows = (
             "py -3 $env:USERPROFILE/.claude/hooks/dispatch.py "
@@ -6115,7 +6115,9 @@ allow_local_binding = true
 
     def test_repo_floor_rejects_windows_invocation_control_operators(self) -> None:
         pin = "2" * 64
-        posix = "python $HOME/.claude/hooks/dispatch.py " "--event pre --runtime codex"
+        posix = (
+            'python "$HOME/.claude/hooks/dispatch.py" ' "--event pre --runtime codex"
+        )
         invocation = (
             "py -3 $env:USERPROFILE/.claude/hooks/dispatch.py "
             "--event pre --runtime codex"
@@ -6154,7 +6156,7 @@ allow_local_binding = true
         pin = "3" * 64
         posix = (
             f"expected='{pin}'\n"
-            "python $HOME/.claude/hooks/dispatch.py "
+            'python "$HOME/.claude/hooks/dispatch.py" '
             "--event pre --runtime codex # > /dev/null | cat && true"
         )
         windows = (
@@ -6185,7 +6187,7 @@ allow_local_binding = true
     def test_repo_floor_rejects_extra_executable_segments(self) -> None:
         pin = "5" * 64
         posix_invocation = (
-            "python $HOME/.claude/hooks/dispatch.py --event pre --runtime codex"
+            'python "$HOME/.claude/hooks/dispatch.py" --event pre --runtime codex'
         )
         windows_invocation = (
             "py -3 $env:USERPROFILE/.claude/hooks/dispatch.py "
@@ -6221,7 +6223,7 @@ allow_local_binding = true
     def test_repo_floor_rejects_command_substitution_in_invocation(self) -> None:
         pin = "7" * 64
         good_posix = (
-            "python $HOME/.claude/hooks/dispatch.py --event pre --runtime codex"
+            'python "$HOME/.claude/hooks/dispatch.py" --event pre --runtime codex'
         )
         good_windows = (
             "py -3 $env:USERPROFILE/.claude/hooks/dispatch.py "
@@ -6327,7 +6329,7 @@ allow_local_binding = true
             "--event pre --runtime codex"
         )
         good_posix = (
-            f"expected={pin}; python $HOME/.claude/hooks/dispatch.py "
+            f'expected={pin}; python "$HOME/.claude/hooks/dispatch.py" '
             "--event pre --runtime codex"
         )
         invalid_pairs = (
@@ -6415,7 +6417,7 @@ allow_local_binding = true
             "--event pre --runtime codex"
         )
         good_posix = (
-            f"expected={pin}; python $HOME/.claude/hooks/dispatch.py "
+            f'expected={pin}; python "$HOME/.claude/hooks/dispatch.py" '
             "--event pre --runtime codex"
         )
         # A floor variable bound to the real dispatcher must not be rebindable to
@@ -6484,16 +6486,18 @@ allow_local_binding = true
         )
         # value_binds_anchored_floor_path is a strict whitelist: only the exact
         # dispatcher/interpreter/wrapper value shapes bind; everything else fails.
-        for good in (
-            "$HOME/.claude/hooks/dispatch.py",
-            "${HOME}/.claude/hooks/dispatch.py",
-            "~/.claude/hooks/dispatch.py",
-            "$env:USERPROFILE/.claude/hooks/dispatch.py",
-            "$env:USERPROFILE+'/.claude/hooks/dispatch.py'",
-            "Join-Path $env:SystemRoot 'py.exe'",
-            ".codex/invoke_deny_floor.sh",
+        for good, windows in (
+            ("$HOME/.claude/hooks/dispatch.py", False),
+            ("${HOME}/.claude/hooks/dispatch.py", False),
+            ("~/.claude/hooks/dispatch.py", False),
+            ('"$env:USERPROFILE/.claude/hooks/dispatch.py"', True),
+            ("$env:USERPROFILE+'/.claude/hooks/dispatch.py'", True),
+            ("Join-Path $env:SystemRoot 'py.exe'", True),
+            (".codex/invoke_deny_floor.sh", False),
         ):
-            self.assertTrue(harness.value_binds_anchored_floor_path(good), good)
+            self.assertTrue(
+                harness.value_binds_anchored_floor_path(good, windows=windows), good
+            )
         for bad in (
             "evil'.claude/hooks/dispatch.py'",
             "x.claude/hooks/dispatch.py",
@@ -6681,7 +6685,7 @@ allow_local_binding = true
     def test_repo_floor_requires_dispatcher_as_python_script_operand(self) -> None:
         pin = "8" * 64
         good_posix = (
-            "python $HOME/.claude/hooks/dispatch.py --event pre --runtime codex"
+            'python "$HOME/.claude/hooks/dispatch.py" --event pre --runtime codex'
         )
         good_windows = (
             "py -3 $env:USERPROFILE/.claude/hooks/dispatch.py "
@@ -6805,7 +6809,7 @@ allow_local_binding = true
     def test_repo_floor_rejects_non_inert_setup_segments(self) -> None:
         pin = "6" * 64
         posix_invocation = (
-            "python $HOME/.claude/hooks/dispatch.py --event pre --runtime codex"
+            'python "$HOME/.claude/hooks/dispatch.py" --event pre --runtime codex'
         )
         windows_invocation = (
             "py -3 $env:USERPROFILE/.claude/hooks/dispatch.py "
@@ -6847,7 +6851,7 @@ allow_local_binding = true
     ) -> None:
         pin = "4" * 64
         posix = (
-            f"expected={pin}; python $HOME/.claude/hooks/dispatch.py "
+            f'expected={pin}; python "$HOME/.claude/hooks/dispatch.py" '
             "--event pre --runtime codex"
         )
         invalid_windows = (
@@ -7400,7 +7404,7 @@ allow_local_binding = true
 
     def test_repo_floor_matches_blocking_handler_normalization(self) -> None:
         pin = "9" * 64
-        posix = f"expected={pin}; python $HOME/.claude/hooks/dispatch.py --event pre --runtime codex"
+        posix = f'expected={pin}; python "$HOME/.claude/hooks/dispatch.py" --event pre --runtime codex'
         windows = (
             f"$expected='{pin}'; py -3 $env:USERPROFILE/.claude/hooks/dispatch.py "
             "--event pre --runtime codex"
@@ -7483,7 +7487,8 @@ allow_local_binding = true
 
         loose_pin = json.loads(current)
         loose_pin["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = (
-            "python $HOME/.claude/hooks/dispatch.py --event pre --runtime codex " + pin
+            'python "$HOME/.claude/hooks/dispatch.py" --event pre --runtime codex '
+            + pin
         )
         self.assertEqual(
             harness.repo_codex_floor_groups(json.dumps(loose_pin), pin), []
@@ -7493,7 +7498,7 @@ allow_local_binding = true
         handler = {
             "type": "prompt",
             "command": (
-                "python $HOME/.claude/hooks/dispatch.py --event pre --runtime codex"
+                'python "$HOME/.claude/hooks/dispatch.py" --event pre --runtime codex'
             ),
             "commandWindows": (
                 "py -3 $env:USERPROFILE/.claude/hooks/dispatch.py "
@@ -9073,6 +9078,59 @@ allow_local_binding = true
         # Unprovable is not a defect in the audited floor, so it does not fail.
         self.assertEqual(result, 0, output)
 
+    def test_doctor_reuses_one_published_reference_for_vendored_floor(self) -> None:
+        repo = self.make_repo()
+        self.write_hooks(repo, self.valid_codex_adapter_text())
+        source = Path(harness.__file__).resolve().parent / "templates" / "hooks"
+        (repo / "hooks").mkdir()
+        (repo / "hooks" / "dispatch.py").write_bytes(
+            (source / "dispatch.py").read_bytes()
+        )
+        published = (True, f"{PUBLISHED_MAIN_TIP}\trefs/heads/main")
+        # A second read could see a new remote tip or recover from a transient
+        # failure. Neither may contradict the reference already used by the
+        # floor-version check within this same doctor invocation.
+        for first, later, expected in (
+            (published, (False, ""), "ok"),
+            ((False, ""), published, "UNPROVEN"),
+        ):
+            with self.subTest(first=first, expected=expected):
+                local = FakeCommandRunner(
+                    {
+                        "rev-parse HEAD": (True, PUBLISHED_MAIN_TIP),
+                        "rev-parse": (True, "main"),
+                        "status --porcelain": (True, ""),
+                        "ls-files": (True, "H templates/hooks/dispatch.py"),
+                        "rev-list": (True, "0\t0"),
+                    }
+                )
+                remote_reads: list[list[str]] = []
+
+                def runner(
+                    argv: list[str], cwd: Path | None = None, **kwargs: object
+                ) -> tuple[bool, str]:
+                    if argv == ["git", "ls-remote", "origin", "refs/heads/main"]:
+                        remote_reads.append(list(argv))
+                        return first if len(remote_reads) == 1 else later
+                    return local(argv, cwd, **kwargs)
+
+                with mock.patch.object(
+                    harness, "offline_aware_command_runner", return_value=runner
+                ):
+                    result, output = self.run_doctor_with_fixture_globals(
+                        repo, as_json=True
+                    )
+                checks = {
+                    entry["check"]: entry for entry in json.loads(output)["checks"]
+                }
+                self.assertEqual(result, 0, output)
+                self.assertEqual(checks["floor version"]["status"], expected)
+                self.assertIn(
+                    f"[{expected}] vendored hooks/dispatch.py vs canonical bytes",
+                    checks["declared vs real"]["detail"],
+                )
+                self.assertEqual(len(remote_reads), 1)
+
     def test_doctor_repo_has_the_same_offline_switch_as_audit(self) -> None:
         # `doctor --repo` runs the same reality checks as `audit`, which means
         # the same `gh` and remote-ref probes. Without the switch an operator
@@ -9116,6 +9174,11 @@ allow_local_binding = true
                 / "hooks.json"
             ).read_text(encoding="utf-8"),
         )
+        source = Path(harness.__file__).resolve().parent / "templates" / "hooks"
+        (repo / "hooks").mkdir()
+        (repo / "hooks" / "dispatch.py").write_bytes(
+            (source / "dispatch.py").read_bytes()
+        )
         captured: list[object] = []
 
         def record(
@@ -9125,8 +9188,15 @@ allow_local_binding = true
             return False, "fixture reason"
 
         with mock.patch.object(harness, "harness_reference_status", side_effect=record):
-            self.run_doctor_with_fixture_globals(repo, offline=True)
+            _result, output = self.run_doctor_with_fixture_globals(repo, offline=True)
         self.assertEqual(captured, [harness.local_only_command_output])
+        self.assertIn("[UNPROVEN] floor version", output)
+        self.assertIn(
+            "[UNPROVEN] vendored hooks/dispatch.py vs canonical bytes", output
+        )
+        self.assertIn(
+            "not compared with the canonical template: fixture reason", output
+        )
 
     def test_doctor_repo_uses_the_network_resolver_by_default(self) -> None:
         repo = self.make_repo()

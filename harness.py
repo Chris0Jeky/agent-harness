@@ -6659,6 +6659,7 @@ def vendored_floor_findings(
     *,
     command_runner: Any,
     deadline: float | None,
+    reference_status: tuple[bool, str] | None = None,
 ) -> list[dict[str, str]]:
     """Compare a repo's vendored floor bytes with template and deployed copies."""
     vendored: list[tuple[str, Path]] = []
@@ -6708,9 +6709,14 @@ def vendored_floor_findings(
                 + f" in {repo}; nothing to drift from the shared dispatcher",
             )
         ]
-    reference_ok, reference_detail = harness_reference_status(
-        harness_root, command_runner, deadline
-    )
+    # A doctor invocation has already measured this same harness checkout for
+    # its global floor-version check. Reuse that observation, including an
+    # unproven result, so one command cannot report two reference states.
+    if reference_status is None:
+        reference_status = harness_reference_status(
+            harness_root, command_runner, deadline
+        )
+    reference_ok, reference_detail = reference_status
     for label, path in vendored:
         name = path.name
         check = f"vendored {label} vs canonical bytes"
@@ -6776,6 +6782,7 @@ def reality_findings(
     claude_home: Path | None = None,
     command_runner: Any = bounded_command_output,
     deadline: float | None = None,
+    reference_status: tuple[bool, str] | None = None,
 ) -> list[dict[str, str]]:
     """Every declaration this repo makes that is cheaply checkable for real."""
     if harness_root is None:
@@ -6794,6 +6801,7 @@ def reality_findings(
             claude_home,
             command_runner=command_runner,
             deadline=deadline,
+            reference_status=reference_status,
         )
     )
     # Advisory-only, so it spends the shared budget AFTER the legs that can
@@ -9569,7 +9577,9 @@ def inert_floor_assignment(segment: str, *, windows: bool) -> tuple[str, str] | 
     match = re.fullmatch(pattern, segment)
     if match is None:
         return None
-    name, value = match.group(1).lower(), match.group(2)
+    name, value = match.group(1), match.group(2)
+    if windows:
+        name = name.lower()
     if "$(" in value or (not windows and "`" in value):
         return None
     if windows and re.fullmatch(
@@ -9607,7 +9617,7 @@ def inert_floor_assignment(segment: str, *, windows: bool) -> tuple[str, str] | 
 # arbitrary-variable path, which would run a repo-shipped attacker file.
 _HOME_VAR = r"(?:~|\$\{?home\}?|\$\{?env:userprofile\}?)"
 # The Windows py launcher must be anchored to a system variable, not `$PWD`.
-_SYSTEM_VAR = r"\$\{?env:(?:systemroot|windir)\}?"
+_SYSTEM_VAR = r"\$(?:env:(?:systemroot|windir)|\{env:(?:systemroot|windir)\})"
 # A generic variable expansion — only used for the (repo-local, /hooks-reviewed)
 # wrapper path, never for the pinned dispatcher or the interpreter.
 _FLOOR_VAR = r"\$(?:\{(?:env:)?[a-z_][a-z0-9_]*\}|(?:env:)?[a-z_][a-z0-9_]*)"
@@ -9620,22 +9630,12 @@ _FLOOR_WRAPPER = r"invoke_deny_floor\.(?:sh|ps1|cmd|bat)"
 # fails closed, because char-level anchoring proved to be repeated whack-a-mole.
 # These shapes are anchored to HOME or a system variable, so they resolve the
 # same wherever Codex starts the session.
-_CWD_INDEPENDENT_FLOOR_VALUE_SOURCES = (
-    # dispatcher: HOME-anchored only (var+separator, `+`-concat, Join-Path)
-    rf"['\"]?{_HOME_VAR}/{_FLOOR_DISPATCH}['\"]?",
-    rf"{_HOME_VAR}\+'/{_FLOOR_DISPATCH}'",
-    rf"join-path {_HOME_VAR} '{_FLOOR_DISPATCH}'",
-    # interpreter (py.exe): SYSTEM-variable anchored, never relative
-    rf"['\"]?{_SYSTEM_VAR}/py\.exe['\"]?",
-    rf"{_SYSTEM_VAR}\+'/py\.exe'",
-    rf"join-path {_SYSTEM_VAR} 'py\.exe'",
-)
 # wrapper, HOME-anchored: `~/work/repo/invoke_deny_floor.sh` resolves to the
 # same file from every session cwd, so it belongs with the cwd-independent
 # shapes even though it names the project's own wrapper script.
 #
-# Unlike the dispatcher shapes above, this one is built PER PLATFORM and
-# refuses single quotes, because "cwd-independent" is only true if the anchor
+# Dispatcher, interpreter and wrapper shapes are built PER PLATFORM and
+# refuse single quotes, because "cwd-independent" is only true if the anchor
 # actually expands where the command runs:
 #   * `$env:USERPROFILE` is PowerShell-only. A POSIX shell expands `$env` to
 #     nothing and runs `:USERPROFILE/...`, so the floor never starts.
@@ -9647,11 +9647,40 @@ _CWD_INDEPENDENT_FLOOR_VALUE_SOURCES = (
 #     normally empty) variable. The recognizer lowercases before matching, so
 #     the original spelling is re-checked separately for the POSIX side;
 #     PowerShell really is case-insensitive and keeps the loose match.
-_POSIX_HOME_ENV_VAR = r"\$\{?home\}?"
-_WINDOWS_HOME_ENV_VAR = rf"(?:{_POSIX_HOME_ENV_VAR}|\$\{{?env:userprofile\}}?)"
+_POSIX_HOME_ENV_VAR = r"\$(?:home|\{home\})"
+_WINDOWS_HOME_ENV_VAR = (
+    rf"(?:{_POSIX_HOME_ENV_VAR}|\$(?:env:userprofile|\{{env:userprofile\}}))"
+)
+_HOME_PATH_ANCHORS = {
+    False: rf"(?:~|{_POSIX_HOME_ENV_VAR})",
+    True: _WINDOWS_HOME_ENV_VAR,
+}
 _WRAPPER_TAIL = rf"/(?:[\w.-]+/)*{_FLOOR_WRAPPER}"
 # Applied to the ORIGINAL-CASE text, never the lowercased normalization.
 _POSIX_HOME_ANCHOR_EXACT = re.compile(r"^(?:~|\$\{?HOME\}?)/")
+_POSIX_DISPATCHER_PATH_EXACT = re.compile(
+    rf"^(?:~|\$(?:HOME|\{{HOME\}}))/{_FLOOR_DISPATCH}$"
+)
+
+
+def _cwd_independent_floor_value_sources(windows: bool) -> tuple[str, ...]:
+    home_var = _WINDOWS_HOME_ENV_VAR if windows else _POSIX_HOME_ENV_VAR
+    dispatcher = rf"{home_var}/{_FLOOR_DISPATCH}"
+    sources = (rf'"{dispatcher}"',)
+    if windows:
+        interpreter = rf"{_SYSTEM_VAR}/py\.exe"
+        # A PowerShell assignment is an expression, not argument mode: an
+        # unquoted `$env:NAME/path` is parsed as division/member syntax.
+        sources += (
+            rf"{home_var}\+'/{_FLOOR_DISPATCH}'",
+            rf"join-path {home_var} '{_FLOOR_DISPATCH}'",
+            rf'"{interpreter}"',
+            rf"{_SYSTEM_VAR}\+'/py\.exe'",
+            rf"join-path {_SYSTEM_VAR} 'py\.exe'",
+        )
+    else:
+        sources += (rf"~/{_FLOOR_DISPATCH}", dispatcher)
+    return sources
 
 
 def posix_home_anchor_case_is_exact(text: str) -> bool:
@@ -9661,6 +9690,8 @@ def posix_home_anchor_case_is_exact(text: str) -> bool:
 
 def _home_anchored_wrapper_source(windows: bool) -> str:
     home_var = _WINDOWS_HOME_ENV_VAR if windows else _POSIX_HOME_ENV_VAR
+    if windows:
+        return rf'"{home_var}{_WRAPPER_TAIL}"'
     return rf'(?:~{_WRAPPER_TAIL}|"?{home_var}{_WRAPPER_TAIL}"?)'
 
 
@@ -9676,12 +9707,13 @@ _WRAPPER_FLOOR_VALUE_SOURCE = (
     rf"['\"]?(?:{_FLOOR_VAR}/)?(?:[\w.-]+/)*{_FLOOR_WRAPPER}['\"]?"
 )
 
-_CWD_INDEPENDENT_FLOOR_VALUE_PATTERNS = tuple(
-    re.compile(pattern) for pattern in _CWD_INDEPENDENT_FLOOR_VALUE_SOURCES
-)
-_FLOOR_VALUE_PATTERNS = _CWD_INDEPENDENT_FLOOR_VALUE_PATTERNS + (
-    re.compile(_WRAPPER_FLOOR_VALUE_SOURCE),
-)
+_CWD_INDEPENDENT_FLOOR_VALUE_PATTERNS = {
+    windows: tuple(
+        re.compile(pattern) for pattern in _cwd_independent_floor_value_sources(windows)
+    )
+    for windows in (False, True)
+}
+_RELATIVE_WRAPPER_VALUE_PATTERN = re.compile(_WRAPPER_FLOOR_VALUE_SOURCE)
 
 
 def value_binds_anchored_floor_path(
@@ -9702,13 +9734,20 @@ def value_binds_anchored_floor_path(
     every cwd — but only under an anchor ``windows`` says this command's shell
     actually expands, and never single-quoted.
     """
+    # On POSIX a backslash escapes a character; it is never a path separator.
+    if not windows and "\\" in value:
+        return False
     normalized = value.lower().replace("\\", "/")
-    patterns = (
-        _CWD_INDEPENDENT_FLOOR_VALUE_PATTERNS
-        if reject_relative_wrapper
-        else _FLOOR_VALUE_PATTERNS
-    )
+    patterns = _CWD_INDEPENDENT_FLOOR_VALUE_PATTERNS[windows]
     if any(pattern.fullmatch(normalized) for pattern in patterns):
+        return windows or bool(_POSIX_DISPATCHER_PATH_EXACT.fullmatch(value.strip('"')))
+    if not reject_relative_wrapper and _RELATIVE_WRAPPER_VALUE_PATTERN.fullmatch(
+        normalized
+    ):
+        # A bare PowerShell RHS invokes a command or parses an expression; it
+        # does not produce the relative/variable-prefixed path as a string.
+        if windows:
+            return normalized[0] in {"'", '"'} and normalized[-1] == normalized[0]
         return True
     if not _HOME_ANCHORED_WRAPPER_VALUE_PATTERNS[windows].fullmatch(normalized):
         return False
@@ -9754,7 +9793,11 @@ def _marker_occurrence_is_anchored(
 
 
 def assigned_floor_variables(
-    segments: list[str], marker: str, allow_extension: bool = False
+    segments: list[str],
+    marker: str,
+    allow_extension: bool = False,
+    *,
+    windows: bool = False,
 ) -> set[str]:
     """Find variables whose assignment statement binds a floor path marker.
 
@@ -9780,7 +9823,8 @@ def assigned_floor_variables(
                 re.finditer(r"(?i)(?:^|[\s{(])\$?([a-z_][a-z0-9_]*)\s*=", prefix)
             )
             if matches:
-                result.add(matches[-1].group(1).lower())
+                name = matches[-1].group(1)
+                result.add(name.lower() if windows else name)
     return result
 
 
@@ -9799,10 +9843,14 @@ def token_is_python_executable(token: str) -> bool:
     return bool(_PYTHON_EXECUTABLE_TOKEN.fullmatch(token.strip("'\"")))
 
 
-def token_references_variable(token: str, names: set[str]) -> bool:
+def token_references_variable(
+    token: str, names: set[str], *, windows: bool = False
+) -> bool:
     stripped = token.strip("'\"")
     return any(
-        re.fullmatch(variable_reference(name), stripped, re.IGNORECASE)
+        re.fullmatch(
+            variable_reference(name), stripped, re.IGNORECASE if windows else 0
+        )
         for name in names
     )
 
@@ -9813,17 +9861,67 @@ def token_references_variable(token: str, names: set[str]) -> bool:
 _PATH_COMPONENT = r"[\w.$:{}~-]+"
 # A literal dispatcher operand must be the HOME-anchored global path — a
 # repo-relative / `$PWD` / bare path would run a repo-shipped attacker file.
-_DISPATCHER_PATH_TOKEN = re.compile(rf"^{_HOME_VAR}/\.claude/hooks/dispatch\.py$")
+_DISPATCHER_PATH_TOKENS = {
+    windows: re.compile(rf"^{_HOME_PATH_ANCHORS[windows]}/{_FLOOR_DISPATCH}$")
+    for windows in (False, True)
+}
 
 
-def token_is_dispatcher(token: str, dispatcher_variables: set[str]) -> bool:
+def floor_token_spelling(segment: str, token: str) -> str | None:
+    """Recover one unambiguous whole shell word before shlex removed quoting.
+
+    Escaped and quote-concatenated spellings do not match the accepted forms.
+    Whole-word boundaries prevent a short variable from borrowing the quote
+    of a longer name elsewhere in the invocation. Conflicting occurrences
+    fail closed rather than picking the first one.
+    """
+    try:
+        tokens = shlex.split(segment, posix=True)
+        raw_tokens = shlex.split(segment, posix=False)
+    except ValueError:
+        return None
+    if len(tokens) != len(raw_tokens):
+        return None
+    spellings = {raw for parsed, raw in zip(tokens, raw_tokens) if parsed == token}
+    if not spellings.issubset({token, f"'{token}'", f'"{token}"'}):
+        return None
+    return next(iter(spellings)) if len(spellings) == 1 else None
+
+
+def floor_token_anchor_is_literal(segment: str, token: str) -> bool:
+    spelling = floor_token_spelling(segment, token)
+    return (
+        spelling is None
+        or spelling.startswith("'")
+        or (token.startswith("~") and spelling.startswith('"'))
+    )
+
+
+def floor_token_is_double_quoted(segment: str, token: str) -> bool:
+    return floor_token_spelling(segment, token) == f'"{token}"'
+
+
+def token_is_dispatcher(
+    token: str,
+    dispatcher_variables: set[str],
+    *,
+    windows: bool = False,
+    anchor_is_literal: bool = False,
+    double_quoted: bool = False,
+) -> bool:
     normalized = token.strip("'\"").lower().replace("\\", "/")
     # The WHOLE token must be the home-anchored dispatcher path, so a sibling
     # (`dispatch.py.evil`), an assignment word (`x=.../dispatch.py`), or a
     # repo-relative path (`.claude/...`, `$pwd/...`) cannot pass.
-    if _DISPATCHER_PATH_TOKEN.fullmatch(normalized):
-        return True
-    return token_references_variable(token, dispatcher_variables)
+    if anchor_is_literal:
+        return False
+    if _DISPATCHER_PATH_TOKENS[windows].fullmatch(normalized):
+        if not windows and not _POSIX_DISPATCHER_PATH_EXACT.fullmatch(token):
+            return False
+        return windows or double_quoted or normalized.startswith("~")
+    return token_references_variable(token, dispatcher_variables, windows=windows) and (
+        windows or double_quoted
+    )
 
 
 def python_script_operand_is_dispatcher(
@@ -9831,6 +9929,8 @@ def python_script_operand_is_dispatcher(
     dispatcher_variables: set[str],
     *,
     allow_py_selector: bool,
+    segment: str,
+    windows: bool,
 ) -> bool:
     """Require the dispatcher as Python's script under a strict option prefix."""
     index = 1
@@ -9839,12 +9939,20 @@ def python_script_operand_is_dispatcher(
     if index < len(tokens) and tokens[index] == "--":
         index += 1
     return index < len(tokens) and token_is_dispatcher(
-        tokens[index], dispatcher_variables
+        tokens[index],
+        dispatcher_variables,
+        windows=windows,
+        anchor_is_literal=floor_token_anchor_is_literal(segment, tokens[index]),
+        double_quoted=floor_token_is_double_quoted(segment, tokens[index]),
     )
 
 
 def segment_invokes_direct_floor(
-    segment: str, dispatcher_variables: set[str], interpreter_variables: set[str]
+    segment: str,
+    dispatcher_variables: set[str],
+    interpreter_variables: set[str],
+    *,
+    windows: bool = False,
 ) -> bool:
     """Recognize conservative direct dispatcher execution shapes."""
     if not (
@@ -9865,22 +9973,33 @@ def segment_invokes_direct_floor(
     head = tokens[0]
     # Direct execution: the dispatcher script (or a variable bound to it) is the
     # command head, launched via its shebang without a Python operand.
-    if token_is_dispatcher(head, dispatcher_variables):
+    if token_is_dispatcher(
+        head,
+        dispatcher_variables,
+        windows=windows,
+        anchor_is_literal=floor_token_anchor_is_literal(stripped, head),
+        double_quoted=floor_token_is_double_quoted(stripped, head),
+    ):
         return True
     # Interpreted execution: a python/py interpreter (literal or a variable
     # bound to py.exe) must run the dispatcher AS its script operand.
-    if token_is_python_executable(head) or token_references_variable(
-        head, interpreter_variables
-    ):
+    interpreter_reference = (
+        token_references_variable(head, interpreter_variables, windows=windows)
+        and not floor_token_anchor_is_literal(stripped, head)
+        and (windows or floor_token_is_double_quoted(stripped, head))
+    )
+    if token_is_python_executable(head) or interpreter_reference:
         stripped_head = head.strip("'\"")
         allow_py_selector = bool(
             re.fullmatch(r"(?i)py(?:\.exe)?", stripped_head)
-            or token_references_variable(head, interpreter_variables)
+            or token_references_variable(head, interpreter_variables, windows=windows)
         )
         return python_script_operand_is_dispatcher(
             tokens,
             dispatcher_variables,
             allow_py_selector=allow_py_selector,
+            segment=stripped,
+            windows=windows,
         )
     return False
 
@@ -9893,10 +10012,7 @@ _WRAPPER_PATH_TOKEN = re.compile(
 # `$pwd`/`$cwd` expansion cannot ride in behind the home anchor, and the anchor
 # itself must be one this command's shell expands (see the value patterns).
 _HOME_ANCHORED_WRAPPER_TOKENS = {
-    windows: re.compile(
-        rf"^(?:~|{_WINDOWS_HOME_ENV_VAR if windows else _POSIX_HOME_ENV_VAR})"
-        rf"{_WRAPPER_TAIL}$"
-    )
+    windows: re.compile(rf"^{_HOME_PATH_ANCHORS[windows]}{_WRAPPER_TAIL}$")
     for windows in (False, True)
 }
 
@@ -9911,6 +10027,10 @@ def token_is_wrapper(
     double_quoted: bool = False,
 ) -> bool:
     stripped = token.strip("'\"").lower().replace("\\", "/")
+    # Native Windows argument tilde expansion depends on PowerShell version
+    # and feature settings that this static check does not establish.
+    if windows and stripped.startswith("~/"):
+        return False
     # The WHOLE token must be a clean path whose final component is the wrapper
     # script, so neither `invoke_deny_floor.sh.evil` nor an assignment word
     # (`x=.../invoke_deny_floor.sh`) can pass.
@@ -9939,7 +10059,11 @@ def token_is_wrapper(
     # the value is enforced separately, because `platform_project_floor_command`
     # requires every setup segment to pass `is_inert_floor_setup_segment` under
     # the same ``reject_relative_wrapper`` flag.
-    return token_references_variable(token, wrapper_variables)
+    return (
+        token_references_variable(token, wrapper_variables, windows=windows)
+        and not anchor_is_literal
+        and (windows or double_quoted)
+    )
 
 
 def shell_script_operand_is_wrapper(
@@ -10026,40 +10150,10 @@ def segment_invokes_wrapper(
         return False
 
     def anchor_is_literal(token: str) -> bool:
-        """Whether the shell passes this token's anchor through UNEXPANDED.
-
-        `shlex` has already removed quotes and escapes, so the token alone
-        cannot tell `$HOME/x` from `'$HOME/x'`, `\\$HOME/x` or `"~/x"` — all of
-        which the shell hands over literally, leaving a session-cwd-relative
-        path. The raw segment is consulted for the character that introduced
-        the token:
-
-        * a backslash escapes either anchor kind;
-        * `~` expands only when wholly unquoted (sh keeps `"~/x"` literal);
-        * a variable expands inside double quotes but not single ones.
-
-        A token that is not present verbatim in the raw segment lost an escape
-        or quote INSIDE itself, which is unrecognizable, so it fails closed.
-        """
-        index = stripped.find(token)
-        if index < 0:
-            return True
-        preceding = stripped[index - 1] if index else ""
-        if preceding == "\\":
-            return True
-        if token.startswith("~"):
-            return preceding in {"'", '"'}
-        return preceding == "'"
+        return floor_token_anchor_is_literal(stripped, token)
 
     def double_quoted(token: str) -> bool:
-        """Whether the token was written as one double-quoted shell word.
-
-        An unquoted `$HOME` expansion is subject to field splitting, so a home
-        directory containing whitespace turns one operand into several and the
-        wrapper never starts.
-        """
-        index = stripped.find(token)
-        return index > 0 and stripped[index - 1] == '"'
+        return floor_token_is_double_quoted(stripped, token)
 
     head = tokens[0]
     # Direct execution: the wrapper (or a variable bound to it) is the head.
@@ -10144,12 +10238,14 @@ def platform_project_floor_command(
         return False
     segments = shell_command_segments(inspected)
     dispatcher_variables = assigned_floor_variables(
-        segments, ".claude/hooks/dispatch.py"
+        segments, ".claude/hooks/dispatch.py", windows=windows
     )
     wrapper_variables = assigned_floor_variables(
-        segments, "invoke_deny_floor", allow_extension=True
+        segments, "invoke_deny_floor", allow_extension=True, windows=windows
     )
-    interpreter_variables = assigned_floor_variables(segments, "py.exe")
+    interpreter_variables = assigned_floor_variables(
+        segments, "py.exe", windows=windows
+    )
     invocation_indexes = [
         index
         for index, segment in enumerate(segments)
@@ -10159,7 +10255,7 @@ def platform_project_floor_command(
         and inert_floor_assignment(segment, windows=windows) is None
         and (
             segment_invokes_direct_floor(
-                segment, dispatcher_variables, interpreter_variables
+                segment, dispatcher_variables, interpreter_variables, windows=windows
             )
             or segment_invokes_wrapper(
                 segment,
@@ -12053,9 +12149,10 @@ def doctor(args: argparse.Namespace) -> int:
             ),
         ]
     )
-    reference_ok, reference_detail = harness_reference_status(
+    reference_status = harness_reference_status(
         harness_root, probe_runner, probe_deadline
     )
+    reference_ok, reference_detail = reference_status
     template_version = floor_version(
         harness_root / "templates" / "hooks" / "dispatch.py"
     )
@@ -12537,6 +12634,7 @@ def doctor(args: argparse.Namespace) -> int:
                 # ref lookups before every one of them degrades to UNPROVEN.
                 command_runner=offline_aware_command_runner(args),
                 deadline=probe_deadline,
+                reference_status=reference_status,
             )
             statuses = {finding["status"] for finding in findings}
             reality_ok: bool | str = True
