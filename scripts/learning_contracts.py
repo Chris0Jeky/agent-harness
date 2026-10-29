@@ -584,6 +584,15 @@ def _genome_rules(record):
     return errors
 
 
+def canary_evidence_errors(gate):
+    """System comparisons do not establish trusted canary membership."""
+    if gate["gate"] == "canary" and gate.get("ref", "").startswith("system-run:"):
+        return [
+            "system-run comparisons lack trusted canary assignment and execution receipts"
+        ]
+    return []
+
+
 def _gate_placement(record):
     errors = []
     life = lifecycle()
@@ -595,6 +604,7 @@ def _gate_placement(record):
         errors.append(f"$.gates: {name} is recorded more than once")
     for index, gate in enumerate(record["gates"]):
         where = f"$.gates[{index}]"
+        errors += [f"{where}: {error}" for error in canary_evidence_errors(gate)]
         if parse_time(gate["at"]) is None:
             errors.append(f"{where}.at: not a real UTC instant")
         if record["from"] not in life["gate_sources"][gate["gate"]]:
@@ -670,6 +680,12 @@ def _run_rules(record):
 def _system_rules(record):
     errors = _time_errors(record, ("at",))
     gate = record["gate"]
+    if record.get("evidence_scope") == "observational":
+        if gate is not None:
+            errors.append("$.gate: an observational comparison never emits a gate")
+        return errors
+    # Older reports remain readable as archived claims. Promotion consumers
+    # refuse them, including extracted system-run: gates, regardless of scope.
     if (gate is None) != (record["verdict"] == "insufficient"):
         errors.append("$.gate: a pass or fail emits its canary gate, insufficient none")
     elif gate is not None and (

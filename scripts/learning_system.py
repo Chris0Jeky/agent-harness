@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-"""System evaluation: candidate-arm runs against baseline-arm runs.
+"""Observational system comparison: candidate-labelled and baseline-labelled runs.
 
-During a canary the estate runs some work under the candidate and the rest
-under the baseline, and every run lands in the experience ledger with its
-``variant``. This module compares the two arms on the system metrics the
-estate already trusts (success, seven-day maturity, reverts, regressions,
-triage verdicts, owner corrections, cost) and writes a ``system-run/v1``
-report whose gate is the candidate's ``canary`` result. The candidate's own
-training evidence is left out of both arms.
+The experience ledger's ``variant`` and source timestamps are producer claims,
+not trusted canary assignment or execution receipts. This module compares the
+two labelled arms on success, seven-day maturity, reverts, regressions, triage
+verdicts, owner corrections and cost, excluding the candidate's training
+evidence and runs predating its artifacts. Every ``system-run/v1`` report has
+``evidence_scope: observational`` and ``gate: null``.
 
-It is a non-regression gate, not a proof of improvement: the candidate passes
-when each arm has enough runs and it is no worse than the baseline beyond the
-policy's tolerances on success, reverts and owner corrections.
+A pass means the observed rates meet the non-regression policy. It supplies
+no canary promotion evidence. A trusted assignment and execution resolver is
+not implemented; adding local labels or claimed receipts cannot enable one.
 """
 
 import argparse
@@ -28,7 +27,7 @@ _SPEC = importlib.util.spec_from_file_location(
 contracts = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(contracts)
 
-TOOL = "agent-harness:scripts/learning_system.py@2"
+TOOL = "agent-harness:scripts/learning_system.py@3"
 DEFAULT_POLICY = {
     "min_runs": 20,
     "min_matured": 10,
@@ -127,7 +126,7 @@ def compare(
     at=None,
     genome=None,
 ):
-    """The system-run/v1 report for a candidate's canary."""
+    """An observational system-run/v1 report; never a canary gate."""
     policy = {**DEFAULT_POLICY, **(policy or {})}
     if (
         policy["min_runs"] < 1
@@ -220,7 +219,6 @@ def compare(
         sort_keys=True,
     )
     run_id = "sys_" + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
-    evaluator = {"kind": "oracle", "runtime": "tool", "model": None, "session": run_id}
     report = {
         "schema": "system-run/v1",
         "id": run_id,
@@ -232,6 +230,7 @@ def compare(
             "session": run_id,
         },
         "candidate": candidate["id"],
+        "evidence_scope": "observational",
         "baseline_variant": baseline_variant,
         "candidate_variant": candidate_variant,
         "excluded_training": excluded,
@@ -241,29 +240,6 @@ def compare(
         "reasons": reasons,
         "gate": None,
     }
-    if verdict != "insufficient":
-        base, cand = stats["baseline"], stats["candidate"]
-        report["gate"] = {
-            "gate": "canary",
-            "result": verdict,
-            "evaluator": evaluator,
-            "at": at,
-            "ref": f"system-run:{run_id}",
-            "summary": (
-                f"{cand['runs']} candidate vs {base['runs']} baseline runs: "
-                + ("; ".join(reasons) if reasons else "no regression beyond tolerance")
-            )[:280],
-            "metrics": {
-                key: value
-                for side, values in (("baseline", base), ("candidate", cand))
-                for key, value in (
-                    (f"{side}_runs", values["runs"]),
-                    (f"{side}_success_rate", values["success_rate"]),
-                    (f"{side}_revert_rate", values["revert_rate"]),
-                )
-                if value is not None
-            },
-        }
     problems = contracts.validate_record(report)
     if problems:
         raise SystemRefusal(f"internal: the report breaks system-run/v1: {problems[0]}")

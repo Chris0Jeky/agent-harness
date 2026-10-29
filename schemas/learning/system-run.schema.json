@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/Chris0Jeky/agent-harness/main/schemas/learning/system-run.schema.json",
   "title": "system-run/v1",
-  "description": "A system evaluation: the outcomes of runs made under the candidate against runs made under the baseline (the canary's evidence), over the system metrics the estate already trusts: success, seven-day maturity, reverts, regressions, triage verdicts, owner corrections and cost. Its gate block is a promotion-record/v1 canary gate result. Contract: SPECS.md section 15.",
+  "description": "An observational comparison of candidate-labelled and baseline-labelled ledger runs. Current reports declare evidence_scope observational and emit no gate, even on pass or fail. Legacy reports remain readable as archived claims, but neither they nor their system-run canary gates authorize promotion: trusted cohort assignment and execution receipts are not implemented. Contract: SPECS.md section 15.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -16,6 +16,10 @@
     "at": {"$ref": "common.schema.json#/$defs/timestamp"},
     "producer": {"$ref": "common.schema.json#/$defs/producer"},
     "candidate": {"$ref": "common.schema.json#/$defs/lc_id"},
+    "evidence_scope": {
+      "description": "Current comparisons are observational only. Omitted only by legacy reports; omission does not restore canary eligibility.",
+      "const": "observational"
+    },
     "baseline_variant": {"$ref": "common.schema.json#/$defs/ref"},
     "candidate_variant": {"$ref": "common.schema.json#/$defs/ref"},
     "excluded_training": {"type": "integer", "minimum": 0},

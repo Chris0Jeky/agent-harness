@@ -49,8 +49,8 @@ REPORTS = ("eval-run/v1", "system-run/v1")
 def gate_results(items, candidate=None):
     """Gate results from raw gate objects or run reports, validated.
 
-    A report (eval-run/v1, system-run/v1) must be about this candidate, and an
-    eval run must have evaluated the genome the candidate names.
+    An eval run must be about this candidate and its named genome. Current and
+    legacy system-run/v1 reports are observational, never canary evidence.
     """
     schema = contracts._document("promotion-record.schema.json")["$defs"]["gate_result"]
     gates = []
@@ -68,6 +68,11 @@ def gate_results(items, candidate=None):
             problems = contracts.validate_record(item)
             if problems:
                 raise PromotionRefusal(f"report {item.get('id')}: {problems[0]}")
+            if item["schema"] == "system-run/v1":
+                raise PromotionRefusal(
+                    "system-run comparisons are observational: trusted canary "
+                    "assignment and execution receipts are not implemented"
+                )
             if candidate is not None and item["candidate"] != candidate["id"]:
                 raise PromotionRefusal(
                     f"report {item['id']} judged {item['candidate']}, not {candidate['id']}"
@@ -85,6 +90,9 @@ def gate_results(items, candidate=None):
         problems = contracts._schema_errors(
             item, schema, "promotion-record.schema.json", ""
         )
+        if problems:
+            raise PromotionRefusal(f"gate result: {problems[0]}")
+        problems = contracts.canary_evidence_errors(item)
         if problems:
             raise PromotionRefusal(f"gate result: {problems[0]}")
         gates.append(item)

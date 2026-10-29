@@ -17,6 +17,11 @@ spec = importlib.util.spec_from_file_location(
 ls = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ls)
 lc = ls.contracts
+promote_spec = importlib.util.spec_from_file_location(
+    "learning_promote", ROOT / "scripts" / "learning_promote.py"
+)
+lp = importlib.util.module_from_spec(promote_spec)
+promote_spec.loader.exec_module(lp)
 
 EXAMPLES = ROOT / "schemas" / "learning" / "examples"
 BASE, CAND = "baseline:example", "gen:gen_example-0001"
@@ -88,19 +93,33 @@ class CompareTests(unittest.TestCase):
         options.setdefault("genome", genome())
         return ls.compare(runs, candidate(), BASE, CAND, at=AT, **options)
 
-    def test_equal_arms_pass_as_a_canary_gate(self):
+    def test_matching_variant_labels_only_produce_observational_metrics(self):
         report = self.compare(arms())
-        self.assertEqual(
-            (report["verdict"], report["gate"]["gate"]), ("pass", "canary")
-        )
+        self.assertEqual(report.get("evidence_scope"), "observational")
+        self.assertEqual((report["verdict"], report["gate"]), ("pass", None))
         self.assertEqual(report["arms"]["candidate"]["precision"], 1.0)
         self.assertEqual(lc.validate_record(report), [])
+
+    def test_assignment_labels_cannot_upgrade_observational_evidence(self):
+        runs = arms()
+        for record in runs:
+            record["joins"] = ["canary-assignment:claimed-cohort"]
+        report = self.compare(runs)
+        self.assertEqual(report.get("evidence_scope"), "observational")
+        self.assertIsNone(report["gate"])
+        runs[0]["canary_assignment"] = {
+            "candidate": candidate()["id"],
+            "genome": genome()["id"],
+            "verified": True,
+        }
+        with self.assertRaises(ls.SystemRefusal):
+            self.compare(runs)
 
     def test_more_reverts_fail(self):
         report = self.compare(arms(cand_reverts=2))
         self.assertEqual(report["verdict"], "fail")
         self.assertTrue(any("reverts rose" in r for r in report["reasons"]))
-        self.assertEqual(report["gate"]["result"], "fail")
+        self.assertIsNone(report["gate"])
         self.assertEqual(report["arms"]["candidate"]["success_rate"], 0.9)
 
     def test_more_owner_corrections_fail(self):
@@ -277,7 +296,7 @@ class CompareTests(unittest.TestCase):
         self.assertEqual((report["verdict"], report["gate"]), ("insufficient", None))
         report = ls.compare(arms(), cand, BASE, CAND, at=AT, genome=None)
         self.assertEqual(report["verdict"], "pass")
-        self.assertEqual(report["gate"]["gate"], "canary")
+        self.assertIsNone(report["gate"])
 
     def test_exact_boundary_instants_are_eligible(self):
         runs = []
@@ -286,7 +305,7 @@ class CompareTests(unittest.TestCase):
             runs.append(run(f"xc{i}", CAND, at=CUTOFF, observed_at=CUTOFF))
         report = self.compare(runs)
         self.assertEqual(report["verdict"], "pass")
-        self.assertEqual(report["gate"]["gate"], "canary")
+        self.assertIsNone(report["gate"])
 
     def test_timezone_equivalent_boundary_is_eligible(self):
         equiv = "2026-09-08T11:05:00.000000Z"
@@ -348,8 +367,35 @@ class CompareTests(unittest.TestCase):
             ls.compare(arms(), candidate(), BASE, "gen:gen_other-0001", at=AT)
         self.assertIn("runs as gen:gen_example-0001", str(caught.exception))
 
-    def test_the_canary_gate_folds_leaving_canary(self):
-        gate = self.compare(arms())["gate"]
+    def test_observational_report_cannot_supply_a_promotion_gate(self):
+        report = self.compare(arms())
+        with self.assertRaises(lp.PromotionRefusal):
+            lp.gate_results([report], candidate())
+
+    def legacy_report(self):
+        return lc.read_records(
+            ROOT / "schemas" / "learning" / "compat" / "accept" / "system-run-v1.jsonl"
+        )[0]
+
+    def test_legacy_report_cannot_authorize_promotion_by_omitting_scope(self):
+        report = self.legacy_report()
+        self.assertNotIn("evidence_scope", report)
+        self.assertEqual(lc.validate_record(report), [])  # archival read compatibility
+        records = lc.read_records(EXAMPLES / "promotion-chain.jsonl")[:2]
+        for item in (report, report["gate"]):
+            with self.subTest(form="report" if "schema" in item else "gate"):
+                with self.assertRaises(lp.PromotionRefusal):
+                    lp.next_record(
+                        candidate(),
+                        records,
+                        [item],
+                        records[0]["producer"],
+                        "2026-09-20T00:01:00Z",
+                        genome=genome(),
+                    )
+
+    def test_a_legacy_system_gate_cannot_fold_leaving_canary(self):
+        gate = self.legacy_report()["gate"]
         records = lc.read_records(EXAMPLES / "promotion-chain.jsonl")[:2]
         leaving = dict(
             copy.deepcopy(records[1]),
@@ -360,7 +406,16 @@ class CompareTests(unittest.TestCase):
         )
         leaving["gates"] = [gate]
         result = lc.fold(candidate(), records + [leaving], genome=genome())
-        self.assertEqual((result.state, result.errors), ("probation", []))
+        self.assertEqual(result.state, "canary")
+        self.assertTrue(result.errors)
+        self.assertEqual(result.effect, "shadow")
+
+    def test_observational_report_cannot_carry_a_forged_canary_gate(self):
+        report = self.legacy_report()
+        report["evidence_scope"] = "observational"
+        self.assertTrue(lc.validate_record(report))
+        with self.assertRaises(lp.PromotionRefusal):
+            lp.gate_results([report], candidate())
 
     def test_success_is_the_contract_definition(self):
         self.assertFalse(
@@ -394,6 +449,9 @@ class CommandLineTests(unittest.TestCase):
             out = io.StringIO()
             with redirect_stdout(out), redirect_stderr(io.StringIO()):
                 self.assertEqual(ls.main(argv), 0)
+                report = json.loads(out.getvalue())
+                self.assertEqual(report.get("evidence_scope"), "observational")
+                self.assertIsNone(report["gate"])
                 self.assertEqual(ls.main(argv + ["--min-runs", "50"]), 3)
                 self.assertEqual(ls.main(argv[:-2] + ["--at", "soon"]), 2)
 

@@ -963,7 +963,7 @@ optional `ext` object keyed by lane slug for producer-private fields consumers i
 | `eval-case/v1` (`case_`) | `suite`, `experience`, `split_key`, `layer`, `category`, `input_ref`, `oracle` | one task built from history with its grader; `split_key` decides its side like an experience's and must equal its anchoring experience's; `category` is one of the five LongMemEval-V2 memory categories or `task`; `layer` is extraction, retrieval, behavioural, procedural or system |
 | `eval-outputs/v1` | `suite`, `variant`, `variant_ref`, `outputs` | what one variant (baseline or candidate) produced per case, recorded by whoever ran it; a missing output fails that case |
 | `eval-labels/v1` | `suite`, `variant`, `evaluator`, `labels` | pass/fail grades for `judge` cases from an evaluator that is never `self`; a run that uses any label is labelled with that evaluator's kind, never `oracle` |
-| `system-run/v1` (`sys_`) | `candidate`, `baseline_variant`, `candidate_variant`, `excluded_training`, `arms`, `policy`, `verdict`, `reasons`, `gate` | a system evaluation over the experience ledger's two arms (runs tagged with `variant`); a pass or fail emits the candidate's `canary` gate, `insufficient` none |
+| `system-run/v1` (`sys_`) | `candidate`, `baseline_variant`, `candidate_variant`, `excluded_training`, `arms`, `policy`, `verdict`, `reasons`, `gate`; current reports also `evidence_scope` | an observational comparison over the experience ledger's two labelled arms; current reports declare `evidence_scope: observational` and always `gate: null`. Legacy reports remain readable but cannot supply canary promotion evidence |
 | `eval-run/v1` (`run_`) | `suite`, `split`, `gate_name`, `candidate`, `genome`, `baseline_ref`, `candidate_ref`, `tier`, `evaluator`, `training`, `cases`, `holdout_digest`, `anchors`, `policy`, `results`, `verdict`, `gate` | the replay evaluator's report; on the hold-out its `gate` is a ready `promotion-record/v1` gate result whose digest and anchors match the run's |
 
 **Lifecycle** (`schemas/learning/lifecycle.json`). A candidate is born in `candidate` (the plan's
@@ -1197,24 +1197,34 @@ recorded output carries `completed`, `turns` and `recovered`, and the case passe
 completed, within `max_turns` when set, and recovered from its injected failure when
 `require_recovery` is set. The run's `results.procedural` reports completion rate (an errored run did
 not complete), mean turns over completed runs, recovery rate over the cases that require recovery, and mean
-cost per variant. A system evaluation (`scripts/learning_system.py`)
-compares the runs the canary made under the candidate (`variant: gen:<id>`, which must be the
-genome the candidate names) with the runs made under the baseline, leaving out runs whose ids are
-the candidate's own evidence. A run's `started_at` (its end `at` when no start is recorded)
+cost per variant. A system comparison (`scripts/learning_system.py`)
+compares runs labelled with the candidate (`variant: gen:<id>`, which must be the
+genome the candidate names) and the baseline, leaving out runs whose ids are
+the candidate's or genome's training evidence. A run's `started_at` (its end `at` when no start is recorded)
 and `observed_at` must be at or after the later
 of the candidate's and supplied genome's `at` (the candidate's alone without a genome). Historical
 runs do not meet arm minima; a historical-only comparison is `insufficient` and emits no gate.
 The report ID binds the evaluator revision and normalized UTC cutoff. These are checks on claimed
 source times in the folded latest observation, not immutable experiment assignment or execution
-receipts; those remain #520/#517. The cutoff is artifact creation time, not canary-entry time.
+receipts. The cutoff is artifact creation time, not canary-entry time. Re-observations can alter
+source timestamps, and neither timestamps nor matching labels authenticate cohort membership.
+Until trusted assignment and execution resolution exists (#520/#517), every report declares
+`evidence_scope: observational` and emits `gate: null`, including `pass` and `fail`. Local assignment
+labels, joins and claimed receipts cannot upgrade that scope. Legacy reports without the scope
+field remain readable for archival compatibility, but the promotion generator refuses all
+`system-run/v1` reports, and both the generator and lifecycle fold refuse extracted canary gates
+with a `system-run:` reference. Field omission cannot restore their promotion eligibility.
 A run's `variant` is fixed by its first observation, like its split key. Each arm reports success
 (`experience_succeeded`, the one success definition), maturity, clean and revert rates,
-regressions, triage precision, owner-correction rate and cost. It is a non-regression gate: with
+regressions, triage precision, owner-correction rate and cost. The verdict is an observational
+non-regression comparison: with
 at least `min_runs` (20) runs and `min_matured` (10) matured runs per arm (reverts are only known
 once runs mature, so an unmatured arm is `insufficient`, never a silent pass), the candidate passes
 when success has not fallen, and reverts and owner corrections have not risen, beyond the policy's
-tolerances (0 by default). The
-`canary` gate it emits drops into the record leaving `canary`.
+tolerances (0 by default). A pass is neither proof of improvement nor canary authorization. CLI
+exit codes remain 0 (observational pass), 1 (observational regression), 2 (refused input) and 3
+(insufficient comparison). See `docs/LEARNING_SYSTEM_EVIDENCE.md` for the compatibility boundary
+and the remaining trusted-store work.
 
 ```powershell
 py -3 scripts\learning_system.py --experiences <experiences.jsonl>... --candidate <lc.json> --baseline-variant <ref> --candidate-variant gen:<id> [--min-runs 20]

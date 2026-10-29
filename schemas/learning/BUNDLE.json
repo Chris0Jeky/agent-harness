@@ -1,6 +1,6 @@
 {
   "schema": "learning-contract-bundle/v1",
-  "version": 4,
+  "version": 5,
   "files": [
     {
       "path": "schemas/learning/candidate-genome.schema.json",
@@ -68,7 +68,7 @@
     },
     {
       "path": "schemas/learning/system-run.schema.json",
-      "sha256": "f7537d3c6389b8caebc3f0119519a4e52799c6aee9c13b8b15bdafaa77fdfba1"
+      "sha256": "a45842e19d7bb63420623fb43b2b15ac836e7d623a9f2f049a84a8324dcedad4"
     },
     {
       "path": "schemas/learning/would-apply.schema.json",
@@ -76,7 +76,7 @@
     },
     {
       "path": "scripts/learning_contracts.py",
-      "sha256": "6b594111d6921cf4b7294f76d872999bdc2dcc386c5be51b4f3933a98b0e9e3d"
+      "sha256": "f39733a7269b7f5be49eda3b1e5bda499109d060a2cf92b3cce4ad0de8f27a71"
     }
   ],
   "record_schemas": [
@@ -95,5 +95,5 @@
     "promotion-record/v1",
     "system-run/v1"
   ],
-  "digest": "9d123592edf3278ddce248cad726e56aa5618407598f0dd57fae1809849b8bdd"
+  "digest": "18a5e6c4dac5949738dd6e78425f63ef57597182773434a52d6307d16bd2c83e"
 }
