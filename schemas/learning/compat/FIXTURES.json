@@ -1,6 +1,6 @@
 {
   "schema": "learning-compat-fixtures/v1",
-  "version": 4,
+  "version": 5,
   "files": [
     {
       "path": "schemas/learning/compat/README.md",
@@ -60,7 +60,7 @@
     },
     {
       "path": "schemas/learning/compat/accept/system-run-v1.jsonl",
-      "sha256": "ca43beec87c38cd8c00b80682432e5b9e12ecc6b41ddaab9a3f29fad6a4aad3d"
+      "sha256": "e7eedb0c50dffb196905a44baac04de9322bbe38330b2f2251f3c5ec7f35d1ce"
     },
     {
       "path": "schemas/learning/compat/reject/episodic-destination.json",
@@ -95,9 +95,13 @@
       "sha256": "490617fb09e0dada1236bb58fa09f9e2db7d9d9bbc200268cf7fce338d4965ef"
     },
     {
+      "path": "schemas/learning/compat/reject/system-observational-canary.json",
+      "sha256": "7e7a371e004fe31aab0b001a5432a076169f7705185bcae4b44dc447f85439dc"
+    },
+    {
       "path": "schemas/learning/compat/reject/would-apply-wrong-hash.json",
       "sha256": "39d2944009619400ed8a602eb917dd5a0c33f7ca3f195402a2e1d2279daf2d8b"
     }
   ],
-  "digest": "2f9a1e9a068327e2e649e43cb98b1af1b7dd65ba2be370684dd91e553eaf6b6e"
+  "digest": "234b35c5d18c4c85f4cf9ed938784a1d76ba710376d1040ad0ad3aedecd6e30a"
 }

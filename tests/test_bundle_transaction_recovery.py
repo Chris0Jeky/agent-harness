@@ -214,9 +214,10 @@ class BundleTransactionRecoveryTests(unittest.TestCase):
     def test_rollback_promotion_failure_recovers_present_and_absent_targets(self):
         for first_present in (False, True):
             with self.subTest(first_present=first_present):
-                _config, _home, first, second, args = self.make(
+                config, _home, first, second, args = self.make(
                     f"rollback-promotion-{first_present}", first_present=first_present
                 )
+                source_recipe = (config / "muse/recipes/review.md").read_bytes()
                 receipt = self.install(args)
                 args.rollback_receipt = str(receipt)
                 real_rename = Path.rename
@@ -235,7 +236,7 @@ class BundleTransactionRecoveryTests(unittest.TestCase):
                 ):
                     harness.sync_global(args)
                 self.assertEqual(b"new worker\x00", first.read_bytes())
-                self.assertEqual(b"new recipe\n", (second / "review.md").read_bytes())
+                self.assertEqual(source_recipe, (second / "review.md").read_bytes())
                 self.assertEqual(
                     b"previous recipe\x00",
                     (receipt.parent / "backups/0001/review.md").read_bytes(),
@@ -253,9 +254,10 @@ class BundleTransactionRecoveryTests(unittest.TestCase):
     def test_rollback_failure_reports_installed_bytes_when_recovery_is_blocked(self):
         for drift in (False, True):
             with self.subTest(drift=drift):
-                _config, _home, first, second, args = self.make(
+                config, _home, first, second, args = self.make(
                     f"rollback-recovery-{drift}"
                 )
+                source_recipe = (config / "muse/recipes/review.md").read_bytes()
                 receipt = self.install(args)
                 args.rollback_receipt = str(receipt)
                 real_rename = Path.rename
@@ -287,7 +289,7 @@ class BundleTransactionRecoveryTests(unittest.TestCase):
                     self.assertEqual(
                         b"concurrent rollback worker\x00", first.read_bytes()
                     )
-                self.assertEqual(b"new recipe\n", (second / "review.md").read_bytes())
+                self.assertEqual(source_recipe, (second / "review.md").read_bytes())
                 recovery = list(receipt.parent.glob("rollback-*"))
                 self.assertEqual(1, len(recovery))
                 self.assertEqual(

@@ -64,9 +64,12 @@ try:
     sys.stdout.write("escaped-output-after-return\\n")
     sys.stdout.flush()
 except BrokenPipeError:
-    ack_path.write_text("capture-closed", encoding="ascii")
+    acknowledgement = "capture-closed"
 else:
-    ack_path.write_text("wrote-after-return", encoding="ascii")
+    acknowledgement = "wrote-after-return"
+ack_pending_path = ack_path.with_suffix(ack_path.suffix + ".pending")
+ack_pending_path.write_text(acknowledgement, encoding="ascii")
+ack_pending_path.replace(ack_path)
 time.sleep(30)
 """
 

@@ -65,7 +65,8 @@ class BundleDestinationLookupTests(unittest.TestCase):
                         ),
                         redirect_stdout(io.StringIO()),
                         self.assertRaisesRegex(
-                            harness.HarnessError, "destinations overlap"
+                            harness.HarnessError,
+                            r"bundle destinations (collide|overlap)",
                         ),
                     ):
                         harness.sync_global(args)
@@ -143,12 +144,14 @@ class BundleDestinationLookupTests(unittest.TestCase):
                 with self.subTest(paths=paths, apply=apply):
                     config, home, args = self.make(f"native-{index}-{apply}", paths)
                     before_source = harness.tree_digest(config)
+                    source_recipe = (config / "muse/recipes/review.md").read_bytes()
                     overlaps = self.native_overlap(home, paths)
                     args.apply = apply
                     with redirect_stdout(io.StringIO()):
                         if overlaps:
                             with self.assertRaisesRegex(
-                                harness.HarnessError, "overlap"
+                                harness.HarnessError,
+                                r"bundle destinations (collide|overlap)",
                             ):
                                 harness.sync_global(args)
                         else:
@@ -160,13 +163,14 @@ class BundleDestinationLookupTests(unittest.TestCase):
                     else:
                         for path in paths:
                             self.assertEqual(
-                                b"new recipe\n",
+                                source_recipe,
                                 (home / path / "review.md").read_bytes(),
                             )
 
     @unittest.skipUnless(os.name == "nt", "native per-directory NTFS case sensitivity")
     def test_native_case_sensitive_home_keeps_distinct_absent_targets(self):
-        _config, home, args = self.make("native-sensitive", ("Tools", "tools/child"))
+        config, home, args = self.make("native-sensitive", ("Tools", "tools/child"))
+        source_recipe = (config / "muse/recipes/review.md").read_bytes()
         try:
             harness.skill_directory_case_sensitive(home, True)
         except harness.HarnessError as exc:
@@ -175,4 +179,4 @@ class BundleDestinationLookupTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             self.assertEqual(0, harness.sync_global(args))
         for path in ("Tools", "tools/child"):
-            self.assertEqual(b"new recipe\n", (home / path / "review.md").read_bytes())
+            self.assertEqual(source_recipe, (home / path / "review.md").read_bytes())

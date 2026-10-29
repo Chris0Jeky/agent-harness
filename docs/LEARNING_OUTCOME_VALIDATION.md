@@ -20,12 +20,29 @@ boundary rather than leaking dictionary/indexing errors. A cursor has exactly
 An empty complete stream is valid and returns the existing neutral results.
 The posterior CLI reports a refusal on stderr, exits 2 and emits no score.
 
-## Preserved policy and limitations
+## Outcome evidence policy
 
-This bounded #511 slice leaves the documented Beta formula, triage counting,
-event IDs, projections, source attribution and cursor ordering unchanged. It
-neither chooses a policy for clean-plus-regression outcomes nor deduplicates
-feedback refs. Those choices remain on #511.
+The posterior uses the latest event for each run. Its positive parameter is
+`1 + confirmed verdicts + successful clean merges`; its negative parameter is
+`1 + refuted verdicts + reverted-or-regressed runs`. A clean merge contributes
+positive outcome evidence only while `success` is true. An explicit regression
+contributes negative outcome evidence as soon as it is observed, even before
+maturity. A run that is both reverted and regressed contributes one negative
+outcome unit. Triage findings are separate evidence and retain their own counts.
+
+Projection deduplicates triage feedback within each run by `(kind, ref, signal)`.
+Copies with different optional `at` or `key` metadata still count once; distinct
+refs or signals remain separate. This rule does not infer that one conflicting
+signal supersedes another. A duplicate-only re-observation emits no new event.
+The observational system comparison uses the same rule for triage precision.
+
+Rebuild the derived event stream from the complete experience history when
+adopting this policy, and rebuild reducers from that full stream. Existing event
+rows contain only aggregate verdict counts, so their duplicate source signals
+cannot be recovered from the events alone. Do not append a fresh projection to
+old events or resume with an old cursor after replacing the stream.
+
+## Remaining limitations
 
 The checks cannot prove that a newest event was not omitted, authenticate
 producer clocks, or detect a consistent rewrite of the whole history. The
@@ -33,6 +50,8 @@ existing version-derived IDs still change their meaning after some late-arrival
 re-projections. Readers must not trust a cursor across re-projection. Trusted
 ingestion offsets or authenticated snapshot manifests remain separate work.
 
-#543 changes account projection in a disjoint hunk of this module. Reconcile
-current main before either merge and retain its explicit source kind/key
-projection; do not overwrite that newer source with a whole older file.
+Source identity remains `kind` plus `key`; optional account attribution does not
+alter event identity. Routing metadata changes still emit a version. The
+producer's runtime and model are observer attribution, not authenticated facts
+about the runtime that executed the original run. These provenance questions,
+trusted ingestion offsets and event-ID migration remain on #511.

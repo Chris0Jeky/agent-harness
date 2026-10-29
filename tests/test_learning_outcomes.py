@@ -160,6 +160,71 @@ class OutcomeTests(unittest.TestCase):
         self.assertEqual(outcomes.read_since(after, advanced), ([], advanced))
         self.assertEqual(outcomes.latest(reversed(after))["muse-job|run-1"], arrived[0])
 
+    def test_posterior_counts_regression_as_one_failure_without_clean_reward(self):
+        cases = (
+            ("published", None, None, (1, 1)),
+            ("merged", None, False, (1, 1)),
+            ("merged", "clean", False, (2, 1)),
+            ("merged", "clean", True, (1, 2)),
+            ("merged", "reverted", False, (1, 2)),
+            ("merged", "reverted", True, (1, 2)),
+            ("published", None, True, (1, 2)),
+        )
+        for immediate, matured, regressed, expected in cases:
+            with self.subTest(
+                immediate=immediate, matured=matured, regression=regressed
+            ):
+                record = experience(day=8, immediate=immediate, matured=matured)
+                record["outcome"]["regression"] = regressed
+                events = self.project([record])
+                self.assertEqual(
+                    outcomes.posterior(events, "example", "test-gaps"), expected
+                )
+
+    def test_late_regression_replaces_the_clean_merge_posterior_contribution(self):
+        clean = experience(day=8, immediate="merged", matured="clean")
+        regressed = copy.deepcopy(clean)
+        regressed["observed_at"] = "2026-09-09T00:00:00Z"
+        regressed["outcome"]["regression"] = True
+        self.assertEqual(
+            outcomes.posterior(self.project([clean]), "example", "test-gaps"),
+            (2, 1),
+        )
+        events = self.project([regressed, clean])
+        self.assertEqual([event["success"] for event in events], [True, False])
+        self.assertEqual(outcomes.posterior(events, "example", "test-gaps"), (1, 2))
+
+    def test_duplicate_triage_signals_count_once_per_kind_ref_and_signal(self):
+        record = experience()
+        record["feedback"] = [
+            {"kind": "triage_verdict", "ref": "decision:a", "signal": "confirmed"},
+            {
+                "kind": "triage_verdict",
+                "ref": "decision:a",
+                "signal": "confirmed",
+                "key": "same-finding",
+                "at": "2026-09-02T00:00:00Z",
+            },
+            {"kind": "triage_verdict", "ref": "decision:b", "signal": "confirmed"},
+            {"kind": "triage_verdict", "ref": "decision:a", "signal": "refuted"},
+            {"kind": "triage_verdict", "ref": "decision:a", "signal": "refuted"},
+            {"kind": "triage_verdict", "ref": "decision:c", "signal": "refuted"},
+            {"kind": "review_verdict", "ref": "decision:b", "signal": "confirmed"},
+        ]
+        events = self.project([record])
+        self.assertEqual(events[0]["verdicts"], {"confirmed": 2, "refuted": 2})
+        self.assertEqual(outcomes.posterior(events, "example", "test-gaps"), (3, 3))
+
+    def test_duplicate_only_feedback_observation_does_not_emit_a_version(self):
+        original = experience()
+        original["feedback"] = [feedback("triage_verdict", "confirmed")]
+        duplicate = copy.deepcopy(original)
+        duplicate["observed_at"] = "2026-09-02T00:00:00Z"
+        duplicate["feedback"].append(copy.deepcopy(duplicate["feedback"][0]))
+        events = self.project([original, duplicate])
+        self.assertEqual(len(events), 1)
+        self.assertEqual(outcomes.posterior(events, "example", "test-gaps"), (2, 1))
+
     def test_only_clean_merges_count_and_triage_signals_are_counted_once(self):
         merged = experience(immediate="merged")
         merged["feedback"] = [
@@ -170,14 +235,14 @@ class OutcomeTests(unittest.TestCase):
             feedback("review_verdict", "confirmed"),
         ]
         events = self.project([merged])
-        self.assertEqual(events[0]["verdicts"], {"confirmed": 2, "refuted": 1})
-        self.assertEqual(outcomes.posterior(events, "example", "test-gaps"), (3, 2))
+        self.assertEqual(events[0]["verdicts"], {"confirmed": 1, "refuted": 1})
+        self.assertEqual(outcomes.posterior(events, "example", "test-gaps"), (2, 2))
         self.assertEqual(outcomes.lesson_eligible(events), set())
         clean = copy.deepcopy(merged)
         clean["observed_at"] = "2026-09-08T00:00:00Z"
         clean["outcome"]["matured"] = "clean"
         events = self.project([merged, clean])
-        self.assertEqual(outcomes.posterior(events, "example", "test-gaps"), (4, 2))
+        self.assertEqual(outcomes.posterior(events, "example", "test-gaps"), (3, 2))
         self.assertEqual(outcomes.posterior(events, "example", "another"), (1, 1))
         self.assertEqual(outcomes.posterior(events, "another", "test-gaps"), (1, 1))
         self.assertEqual(outcomes.lesson_eligible(events), {"muse-job|run-1"})
