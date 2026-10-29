@@ -1226,7 +1226,14 @@ class HarnessTests(unittest.TestCase):
         self.assert_no_powershell_codex_probe()
 
     def test_doctor_windows_codex_probe_without_launcher_fails_named(self) -> None:
-        output = self.run_doctor_on_simulated_host(windows=True, codex_launcher=None)
+        # A Python installation may itself live under a directory named codex.
+        # The fixture intercepts its version probe; only the executable basename
+        # identifies whether Doctor attempted to spawn Codex.
+        fixture_python = str(Path(self.temp.name) / "codex-runtime" / "python")
+        with mock.patch.object(harness.sys, "executable", fixture_python):
+            output = self.run_doctor_on_simulated_host(
+                windows=True, codex_launcher=None
+            )
 
         self.assertIn(
             "[FAIL] codex: codex: no codex .exe/.com/.cmd/.bat launcher", output
@@ -1235,7 +1242,16 @@ class HarnessTests(unittest.TestCase):
         codex_spawns = [
             command
             for command in self.doctor_commands
-            if command[1:] == ["--version"] and "codex" in command[0].lower()
+            if command[1:] == ["--version"]
+            and command[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+            in {
+                "codex",
+                "codex.exe",
+                "codex.com",
+                "codex.cmd",
+                "codex.bat",
+                "codex.ps1",
+            }
         ]
         self.assertEqual(codex_spawns, [])
         self.assert_no_powershell_codex_probe()

@@ -17,6 +17,7 @@ import threading
 import unittest
 from unittest import mock
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 DISPATCH_PATH = ROOT / "templates" / "hooks" / "dispatch.py"
@@ -286,30 +287,49 @@ class SmokeNeutralFixtureRootTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.smoke = load_module("neutral_root_smoke", SMOKE_PATH)
-        cls.dispatch = cls.smoke.load_dispatch_module()
 
-    def _require_neutral_home(self) -> None:
-        home = os.path.expanduser("~")
-        if self.dispatch.declared_project_dirs(home):
-            self.skipTest("user home inherits a tier declaration")
-        if self.dispatch.is_within_temp(home):
-            self.skipTest("user home sits inside the temp allowance")
+    def setUp(self) -> None:
+        fixture = tempfile.TemporaryDirectory()
+        self.addCleanup(fixture.cleanup)
+        self.fixture_base = Path(fixture.name).resolve()
+        self.fixture_temp = self.fixture_base / "temp"
+        self.fixture_temp.mkdir()
+        self.dispatch = self.smoke.load_dispatch_module()
 
-    def test_temp_backed_home_skips_neutral_home_cases(self) -> None:
-        with (
-            mock.patch.object(self.dispatch, "declared_project_dirs", return_value=[]),
-            mock.patch.object(self.dispatch, "is_within_temp", return_value=True),
-            self.assertRaises(unittest.SkipTest),
-        ):
-            self._require_neutral_home()
+        # Keep the real containment and authority walkers, but give them a
+        # disposable temp boundary and declarations owned by this test. Neither
+        # a read-only home nor an ambient tier above TMPDIR changes the fixture.
+        declared_project_dirs = self.dispatch.declared_project_dirs
+
+        def fixture_declarations(candidate: str) -> list[str]:
+            return [
+                declared
+                for declared in declared_project_dirs(candidate)
+                if Path(declared).is_relative_to(self.fixture_base)
+            ]
+
+        self.enterContext(
+            mock.patch.object(
+                self.dispatch, "declared_project_dirs", side_effect=fixture_declarations
+            )
+        )
+        self.enterContext(
+            mock.patch.object(
+                self.dispatch,
+                "tempfile",
+                SimpleNamespace(gettempdir=lambda: str(self.fixture_temp)),
+            )
+        )
+        self.enterContext(
+            mock.patch.object(
+                self.smoke, "load_dispatch_module", return_value=self.dispatch
+            )
+        )
 
     def test_candidate_under_declared_authority_is_rejected(self) -> None:
-        self._require_neutral_home()
-        # Home-anchored (non-temp) so the authority walk, not the temp
-        # allowance, is what rejects the nested candidate.
-        base = os.path.join(
-            os.path.expanduser("~"), ".agent-harness-smoke-authority-test"
-        )
+        # Both candidates are outside the fixture temp allowance, so the real
+        # authority walk is what rejects the nested candidate.
+        base = str(self.fixture_base)
         declared = os.path.join(base, "host")
         nested = os.path.join(declared, "hooks-clone")
         clean = os.path.join(base, "clean")
@@ -317,57 +337,32 @@ class SmokeNeutralFixtureRootTests(unittest.TestCase):
         os.makedirs(nested, exist_ok=True)
         os.makedirs(clean, exist_ok=True)
         tier_path = os.path.join(declared, ".claude", "tier.json")
-        try:
-            with open(tier_path, "w", encoding="utf-8") as handle:
-                json.dump({"tier": 4, "flags": {"sensitive_data": True}}, handle)
-            selected = self.smoke.neutral_fixture_root(candidates=[nested, clean])
-            self.assertEqual(os.path.dirname(selected), clean)
-            self.assertTrue(
-                os.path.basename(selected).startswith(".agent-harness-smoke-")
-            )
-        finally:
-            if "selected" in locals() and os.path.isdir(selected):
-                shutil.rmtree(selected)
-            os.remove(tier_path)
-            for path in (
-                os.path.join(declared, ".claude"),
-                nested,
-                declared,
-                clean,
-                base,
-            ):
-                if os.path.isdir(path) and not os.listdir(path):
-                    os.rmdir(path)
+        with open(tier_path, "w", encoding="utf-8") as handle:
+            json.dump({"tier": 4, "flags": {"sensitive_data": True}}, handle)
+        self.assertEqual(self.dispatch.declared_project_dirs(nested), [declared])
+        self.assertFalse(self.dispatch.is_within_temp(nested))
+        selected = self.smoke.neutral_fixture_root(candidates=[nested, clean])
+        self.assertEqual(os.path.dirname(selected), clean)
+        self.assertTrue(os.path.basename(selected).startswith(".agent-harness-smoke-"))
 
     def test_temp_resident_candidate_is_rejected(self) -> None:
-        self._require_neutral_home()
-        home_candidate = os.path.join(
-            os.path.expanduser("~"), ".agent-harness-smoke-fixtures-test"
-        )
-        os.makedirs(home_candidate, exist_ok=True)
-        with tempfile.TemporaryDirectory() as temp_candidate:
-            try:
-                selected = self.smoke.neutral_fixture_root(
-                    candidates=[temp_candidate, home_candidate]
-                )
-                self.assertEqual(os.path.dirname(selected), home_candidate)
-            finally:
-                if "selected" in locals() and os.path.isdir(selected):
-                    shutil.rmtree(selected)
-                if os.path.isdir(home_candidate) and not os.listdir(home_candidate):
-                    os.rmdir(home_candidate)
+        clean = self.fixture_base / "clean"
+        clean.mkdir()
+        with tempfile.TemporaryDirectory(dir=self.fixture_temp) as temp_candidate:
+            self.assertTrue(self.dispatch.is_within_temp(temp_candidate))
+            self.assertFalse(self.dispatch.is_within_temp(str(clean)))
+            selected = self.smoke.neutral_fixture_root(
+                candidates=[temp_candidate, str(clean)]
+            )
+            self.assertEqual(Path(selected).parent, clean)
 
     def test_no_clean_candidate_refuses_to_run(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_only:
+        with tempfile.TemporaryDirectory(dir=self.fixture_temp) as temp_only:
             with self.assertRaises(SystemExit):
                 self.smoke.neutral_fixture_root(candidates=[temp_only])
 
     def test_main_removes_run_owned_fixture_root_on_exit(self) -> None:
-        self._require_neutral_home()
-        parent = os.path.join(
-            os.path.expanduser("~"), ".agent-harness-smoke-cleanup-test"
-        )
-        os.makedirs(parent, exist_ok=True)
+        parent = str(self.fixture_base)
         selected = self.smoke.neutral_fixture_root(candidates=[parent])
         self.smoke._FIXTURE_ROOT = selected
         try:
@@ -380,8 +375,6 @@ class SmokeNeutralFixtureRootTests(unittest.TestCase):
             if os.path.isdir(selected):
                 shutil.rmtree(selected)
             self.smoke._FIXTURE_ROOT = None
-            if os.path.isdir(parent) and not os.listdir(parent):
-                os.rmdir(parent)
 
     def test_progress_and_case_output_are_flushed_through_a_pipe(self) -> None:
         script = f"""
