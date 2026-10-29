@@ -284,7 +284,7 @@ class RegexExecutionContractTests(unittest.TestCase):
         self.assertIsNotNone(processes[0].returncode, "worker was not reaped")
 
     def test_exact_reply_quota_remains_a_valid_grade(self):
-        reply = b' ' * 47 + b'{"matched": true}'
+        reply = b" " * 47 + b'{"matched": true}'
         self.assertEqual(64, len(reply))
         with (
             mock.patch.object(
