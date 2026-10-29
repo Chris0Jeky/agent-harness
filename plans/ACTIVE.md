@@ -1,150 +1,60 @@
 # Active workstreams
 
-## Source qualification closeout (2026-10-13)
+## Source maintenance checkpoint — 2026-10-29
 
-Observed published source: `main@67a60279435c459c51e127ecee78f13a2a380b91` (#562's merge).
-The finite intake is closed. Owned delegate jobs are drained; the scoped lane is archived.
+Baseline inspected: [`main@471ff6c`](https://github.com/Chris0Jeky/agent-harness/commit/471ff6c92457986b30da1091eea8e4e67613896a).
+The source PRs below have independent reviews with no confirmed findings. Their linked heads,
+checks, follow-up fixes and merge receipts own current completion status.
+This record claims no installation, trust change, live canary or consumer adoption.
 
-- **Merged earlier:** #541/#542/#543/#544/#545/#546/#548/#550; #457/#459/#506/#533 closed for source acceptance.
-- **Merged continuation:** #555 private atomic replay publication and parent-only caller binding;
-  #559 bidirectional selected-tree identity refusal; #560 protects named inputs, visited Codex/Claude
-  transcripts and fellow outputs; #561 corrects existing SVG examples; #562 refuses nonfinite/non-JSON
-  record publication and refreshes the validator byte pin (bundle/fixtures remain version 3).
-- **Superseded:** #539/#549 closed without merging their failed heads; branches/history retained.
-- **Open evidence:** #523 retains absent-suffix/native-bind qualification; #556 repeated tree walks;
-  #558 advisory-ledger JSONL/#563 programmatic keys; #520/#517 trusted receipt/clock evidence.
-- **Boundary:** source acceptance only. Doctor exits 1 for installed 1.8.0 versus source 1.8.1 drift
-  and unproven worktree canonical comparison. No installation, trust, live canary, consumer adoption
-  or private corpus publication is inferred. [HUMAN_TODO.md](../HUMAN_TODO.md) retains H-18/H-19/H-22.
-
-The earlier sections below are dated historical checkpoints, not current queue admission.
-
-## Workspace reference qualification (2026-10-02)
-
-- #414 and #417 are merged: the handoff pack is an advisory authoring profile and the SQLite receipt lab is a single-owner reference, not native adoption.
-- The receipt suite now backs up one leased fictional row into two independent databases and demonstrates that copied epoch/fence values allow both owners to accept divergent local results. Receiver fencing and old-writer isolation still require native proof.
-- The handoff profile maps generic conformance cases to their native proof owners and separates cancellation request, admission stop, process acknowledgement and effects reconciliation. Native receipts remain with adopters; no runner, permission checker or gate is added.
-- #410 and #416 are closed for demonstrated source acceptance; native adoption remains a separate evidence boundary. Human gates remain in `HUMAN_TODO.md`.
-
-## Privacy and source-collision continuation (2026-10-02)
-
-- #419's contextual GitHub repository-valued options and quoted command words are covered by fictional importer regressions. Local source directories, formatting templates and ordinary option values retain their contextual roles.
-- #401's reproduced SSH-family host options, every keyscan host and long-email ordering gaps are repaired. Existing single-label/IP/IPv6 registry coverage is reconciled with controls; persisted extraction/write/kernel fixtures exercise the combined behavior. Unknown shell grammar remains outside the recognizer and imported output stays private.
-- #375's absent/existing-target source-collision seam is covered by disposable native NTFS fixtures, including case-sensitive directory and Unicode-distinct controls. Hardlink ambiguity stays safely refused; normalization-collapsing and non-inherited POSIX directory lookup flags and fake mode bits remain separate qualification leads. This is pre-mutation refusal, not a claim of concurrent-writer exclusion.
-- The generic handoff schemas and declaration-only `bind_pack` boundary are unchanged. Native runtime, deployment/device and owner acceptance remain distinct; no private receipt or topology is published here.
-
-Snapshot: 2026-10-01 13:18 UTC, before quality integration. Observed `main` head `7c10099`
-(PR #409's merge). The 2026-09-02 snapshot and
-everything older now live in `docs/archive/status-2026-09.md`; git history holds the rest.
-
-## Quality pass (2026-10-01)
-
-Eight Muse review lenses completed with two file-only worker candidates, at two-worker capacity
-and a 2048 MB memory floor. The coordinator reproduced accepted defects and ran each candidate's
-required checks; the supervisor is stopped with no in-flight jobs. Raw reports and logs remain
-outside Git. No estate process, installed floor or consumer marker was changed.
-
-- **#408 merged:** out-of-range UTC normalization in worktree leases now follows the malformed
-  lease/keep path rather than raising; real Git fixtures prove plan/apply preserve the tree.
-- **#409 merged:** re-recording stages all artifacts and recovers prior outputs after a later
-  write failure, while preserving a later writer and retaining recovery bytes when necessary.
-- **#412, reviewed source PR:** private Docker/Podman login endpoints and additional credential forms are
-  scrubbed. Independent review caught an escaped-quote regression, fixed before publication.
-- **#413, reviewed source PR:** malformed receipt/coordinator JSON is isolated by the outcome ledger, including
-  nesting, duplicate keys and non-finite/overflow floats.
-- **Integration branch:** includes the reviewed #412/#413 commits and floor 1.7.3, which restores
-  the existing unscaled dispatcher-error deny for errors
-  in later-fragment checks. Its separator semantics remain pinned by #267/#268 controls. The
-  pathological quoted-brace availability edge is tracked in #365; #411 tracks positional
-  `gh repo` selector scrubbing. Neither is a claim that scrubbed corpora are public-safe.
-
-Floor 1.7.2 remains deployed. The 1.7.3 producer source may merge under the gate, but deployment,
-consumer marker refresh and live trust/canaries still wait on H-14. Recording recovery does not
-claim process-crash atomicity or exclusion of concurrent writers. Public replay extraction/release
-is a separate step; H-19 remains open.
-
-## Owner decisions in force (2026-09-29)
-
-- **Merge autonomy.** Agents may merge any PR once its requirements are met: green proving checks
-  at the exact head, global law 2's review gate, the three-minute aging floor, merge commits only. The
-  2026-09-28 "nobody merges" rule for the replay and merge-gate briefs is withdrawn.
-- **AH-10 unlocked for the replay tool.** The owner approved a clean public repository, the name
-  `charter-replay`, Apache-2.0, publication and the demo GIF (REPLAY_TOOL_PRODUCT RP-004/RP-005,
-  AGENT_HARNESS_OPERATIONS AH-006). The source of truth stays `replay_v0/` here; the public
-  repository is a clean extraction with fresh history.
-- **Floor posture.** `core` is the default below T4/`wave_mode` for non-sensitive repositories
-  (1.7.0, #356); rulesets protect default-branch history on every floored repository.
-
-## Floor 1.7.2 rollout (SPECS §5.3)
-
-| Step | State |
+| Work | Source scope and remaining boundary |
 |---|---|
-| Producer merge | **done**: #376, merge `e6973e8`, marker `326afdad…84b2af` |
-| claude-config vendoring | **done**: claude-config#530 (merge `2f658f1`); smoke 2443/2443, fast gate green |
-| Global deployment | **done**: `~/.claude/hooks` holds 1.7.2 (normalized digest equals the marker; backups `*.bak-20260928T235143Z`) |
-| Consumer markers | **merged**: SwarmingLilMen#80, collaborative-hill-lab#14, Pulseboard#168. EvidenceDeck#35 is moved to 1.7.2 but blocked by H-18 |
-| Consumer re-trust and canaries | **human**: H-14, per root, after its marker merge |
+| [#579](https://github.com/Chris0Jeky/agent-harness/pull/579) | Observational canary comparisons and corrected outcome weighting. Trusted assignment/execution evidence remains [#520](https://github.com/Chris0Jeky/agent-harness/issues/520); ingestion and event identity remain [#511](https://github.com/Chris0Jeky/agent-harness/issues/511). |
+| [#580](https://github.com/Chris0Jeky/agent-harness/pull/580) | Actionable bundle recovery maps and native lookup of absent path names; carries closure of [#278](https://github.com/Chris0Jeky/agent-harness/issues/278). Real bind-mount qualification remains [#523](https://github.com/Chris0Jeky/agent-harness/issues/523). |
+| [#581](https://github.com/Chris0Jeky/agent-harness/pull/581) | Replay cleanup, isolated startup and bounded regex worker evidence; carries closure of [#578](https://github.com/Chris0Jeky/agent-harness/issues/578) and [#576](https://github.com/Chris0Jeky/agent-harness/issues/576). Native platform checks own the remaining proof. |
+| [#582](https://github.com/Chris0Jeky/agent-harness/pull/582) | Portable smoke and Doctor test fixtures. Local root suite passes: 2,114 tests, 68 skips; native CI owns platform proof. |
+| [#583](https://github.com/Chris0Jeky/agent-harness/pull/583) | Interactive recorded replay lab and visual docs entry point. Python/JavaScript tests and the native Pages build pass; follow the PR for deployed browser verification. |
 
-Codex's late review of the 1.7.2 bytes (claude-config#530) raised two P1s that are documented
-limitations (FLOOR_LIMITATIONS lines on the inline-program tripwire and on core heredocs as data)
-and one P2 false positive, now tracked in #365.
+#580's Windows CI exposed test assumptions about collision wording and CRLF fixture bytes.
+Its correction retains refusal and byte-preservation checks; follow the PR for the resulting head.
 
-## Replay product ("measure your hook")
+The Doctor recognizer's platform/quote and reference-probe acceptance is tracked separately in
+[#78](https://github.com/Chris0Jeky/agent-harness/issues/78). The dispatcher remains frozen
+under [BLUEPRINT](../BLUEPRINT.md). Remaining source defects and parked consumer contracts are
+mapped in [ROADMAP](../ROADMAP.md); [SYSTEM_STATE](../docs/SYSTEM_STATE.md) records proof limits.
 
-- **#384** (merged) adds the hook adapter, `charter-replay` entry point, private transcript importer,
-  charter-v0.2 corpus (494 events) and examples. Review was two rounds, both closed.
-- The clean public repository `Chris0Jeky/charter-replay` exists (public, private vulnerability
-  reporting on, squash merges off). Extraction runs from merged `main`: package renamed to
-  `charter_replay`, Apache-2.0, CI on Ubuntu/Windows/macOS, a trusted-publishing release workflow.
-- PyPI publication needs a trusted publisher on pypi.org; that is a human step (H-19).
-- Private corpus measurement (local only, aggregates in #384): 130,624 unique scrubbed commands;
-  on a 10,000 sample, the floor at 1.7.2 denies 1.18% at tier 3 and 9.12% at tier 4.
-- charter-replay v0.1.0 is released on GitHub (wheel and sdist); PyPI waits on H-19.
-- Source of truth: still `replay_v0/` here, extracted to the public repository. Once product
-  work lands in `Chris0Jeky/charter-replay` directly (the owner is starting an outside
-  architecture effort there), the direction flips; decide it before the two trees diverge.
+## Backlog reconciliation
 
-## Merged 2026-09-29
+[#565](https://github.com/Chris0Jeky/agent-harness/pull/565) closed advisory-ledger JSON parsing
+(#558) and programmatic string-key validation (#563); [#566](https://github.com/Chris0Jeky/agent-harness/pull/566)
+closed repeated preflight tree walks (#556). These are shipped source repairs.
 
-#376 (floor 1.7.2), #380 (Doctor Codex launcher probe), #381 (status_doc budget), #345 (Doctor
-controlled-dispatcher checks; #339 closed as superseded), #382 (tier.json wrong-type reporting) and
-#384 (replay adapter). The conflicts #345/#380 and #382/#381 were resolved on the PR branches; the
-combined tree passed 1,322 unit and 186 replay tests locally before the sequential merges.
+[#191](https://github.com/Chris0Jeky/agent-harness/issues/191) now records that
+[Taskdeck #1551](https://github.com/Chris0Jeky/Taskdeck/pull/1551) merged. Separating its portable
+create/initialize contract remains work. [#201](https://github.com/Chris0Jeky/agent-harness/issues/201)
+stays open: its portable numeric core shipped in #239, while #243 retains the toolchain-dependent
+fail-closed cases. No new deployment follows from either reconciliation.
 
-Morning, also merged: #386 (the late Codex P2s on #384: relative hook executables, non-HTTP private
-hosts) and #388 (another session: BLUEPRINT and SPECS follow the laws changes).
+## Human gates
 
-Afternoon wave (Muse workers and lenses, one Sonnet helper, merges after a fresh-context review
-and exact-head CI): #390 (ledger fingerprint parity, #387), #391 (unreadable budget docs, #383),
-#392 (terminal-only policy stderr, #141), #393 (hook adapter test gaps), #394 (hook CLI
-hardening), #398 (secret-path coverage table, #244), #399 (CLAUDE.md lint list) and #400
-(`seed` gitignores `/.claude/worktrees/`, #236), then #403 (CI: Verify lints
-first with a 30-minute budget, #402) and, last, #396 (importer scrub leaks).
+[HUMAN_TODO](../HUMAN_TODO.md) owns the exact steps and close conditions:
 
-## PR checkpoint (2026-10-01, before integration)
+- **H-18:** private-repository Actions billing; prove a private-repository run starts.
+- **H-19:** charter-replay's PyPI trusted publisher and successful package installation.
+- **H-22:** per-root adapter proof, fresh-session review, individual trust, enabled state and
+  canaries. The extract-api prerequisite and other-workstation steps remain explicit there.
 
-| PR | State |
-|---|---|
-| #332 | older parked lane from another session; not touched here |
-| #406 | another session's draft architecture synthesis; not touched here |
-| #412 | reviewed quality privacy source; commits included in the integration branch |
-| #413 | reviewed quality ledger source; commits included in the integration branch |
+## Owner decisions in force
 
-## Open follow-ups
+- **Merge gate:** exact-head green proving checks, global law 2 review, the three-minute aging
+  floor and merge commits only. No squash. Source acceptance does not establish runtime state.
+- **Extraction:** the 2026-09-29 decision approved the public `charter-replay` repository,
+  Apache-2.0 and demo GIF. The 2026-10-04 decision made the extraction manifest path-pinned.
+  [REPLAY_TOOL_PRODUCT](../REPLAY_TOOL_PRODUCT.md) owns the product scope; blueprint-plugin
+  extraction stays deferred. Record a source-direction decision before the two trees diverge.
+- **Repository licence:** owner-authored content is GPL-3.0-only; the curl-derived fixture keeps
+  its own licence. See [LICENSING](../LICENSING.md). The replay product decision is separate.
 
-- #233 (open): the declared two-workstream cap versus region-disjoint lanes. Until it
-  rules, a region-disjoint lane does not consume a workstream slot (the assumption recorded in
-  `docs/archive/status-2026-09.md`).
-
-- #365: remaining core false positives (57 T3 denies in the decider; `py`/`python3.12` heads;
-  gh body-heredoc; prose punctuation as path shape).
-- #370 and #375: audit protection and sync follow-ups (#370 status comment 2026-09-29: the
-  empty-leg item is resolved).
-- #395 (owner): relax the extraction manifest's byte pin to a path pin.
-- #397 and #401: importer scrub speed on long inputs, and the remaining bare-host gaps.
-- #378: wrapped downloaders (taskset, flock, watch, wsl) under the feature freeze.
-
-## Human items
-
-`HUMAN_TODO.md` holds them: H-14 (re-trust and canaries, now for 1.7.2), H-18 (Actions billing for
-private repositories), H-19 (PyPI trusted publisher for charter-replay).
+Earlier source, rollout and runtime observations are preserved in the
+[dated archive](../docs/archive/status-2026-10.md). Its open/closed and deployed/proven labels
+apply only to their historical checkpoints.
