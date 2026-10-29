@@ -200,7 +200,7 @@ else:
 
     def test_regex_runner_failure_cannot_be_a_passing_grade(self):
         with mock.patch(
-            "subprocess.run", side_effect=OSError("synthetic launch failure")
+            "subprocess.Popen", side_effect=OSError("synthetic launch failure")
         ):
             with self.assertRaisesRegex(ev.EvalRefusal, "regex"):
                 ev.grade(
@@ -217,10 +217,12 @@ else:
             (0, '{"matched": true, "extra": 1}'),
             (0, '{"error": "synthetic worker failure"}'),
         ):
-            completed = subprocess.CompletedProcess([], code, stdout=output)
+            completed = subprocess.CompletedProcess(
+                [], code, stdout=output.encode("utf-8"), stderr=b""
+            )
             with (
                 self.subTest(code=code, output=output),
-                mock.patch("subprocess.run", return_value=completed),
+                mock.patch.object(ev, "_run_regex_worker", return_value=completed),
             ):
                 with self.assertRaises(ev.EvalRefusal):
                     ev.grade(
@@ -238,6 +240,93 @@ else:
         )
         self.assertFalse(passed)
         self.assertEqual(detail, {})
+
+
+class RegexExecutionContractTests(unittest.TestCase):
+    def test_worker_reply_and_diagnostics_have_independent_capture_quotas(self):
+        for descriptor, budget in (
+            (1, "REGEX_REPLY_LIMIT_BYTES"),
+            (2, "REGEX_STDERR_LIMIT_BYTES"),
+        ):
+            worker = (
+                f"import os; os.write({descriptor}, b' ' * 128); "
+                "os.write(1, b'{\"matched\": true}')"
+            )
+            with (
+                self.subTest(descriptor=descriptor),
+                mock.patch.object(ev, "_REGEX_WORKER", worker),
+                mock.patch.object(ev, budget, 64, create=True),
+            ):
+                with self.assertRaisesRegex(ev.EvalRefusal, "capture quota"):
+                    ev._bounded_regex("x", "x")
+
+    def test_worker_overflow_kills_and_reaps_a_continuous_writer(self):
+        worker = (
+            "import os, time\nwhile True:\n"
+            "    os.write(2, b'x' * 4096)\n    time.sleep(0.005)\n"
+        )
+        processes = []
+        popen = subprocess.Popen
+
+        def track_process(*args, **kwargs):
+            process = popen(*args, **kwargs)
+            processes.append(process)
+            return process
+
+        with (
+            mock.patch.object(ev, "_REGEX_WORKER", worker),
+            mock.patch.object(ev, "REGEX_STDERR_LIMIT_BYTES", 64, create=True),
+            mock.patch.object(subprocess, "Popen", side_effect=track_process),
+        ):
+            with self.assertRaisesRegex(ev.EvalRefusal, "capture quota"):
+                ev._bounded_regex("x", "x")
+        self.assertEqual(1, len(processes))
+        self.assertIsNotNone(processes[0].returncode, "worker was not reaped")
+
+    def test_exact_reply_quota_remains_a_valid_grade(self):
+        reply = b' ' * 47 + b'{"matched": true}'
+        self.assertEqual(64, len(reply))
+        with (
+            mock.patch.object(
+                ev, "_REGEX_WORKER", f"import os; os.write(1, {reply!r})"
+            ),
+            mock.patch.object(ev, "REGEX_REPLY_LIMIT_BYTES", 64, create=True),
+        ):
+            self.assertTrue(ev._bounded_regex("x", "x"))
+
+    def test_malformed_utf8_and_duplicate_members_refuse(self):
+        for reply in (
+            b'{"matched": false, "matched": true}',
+            b'{"matched": true}\xff',
+            b'{"matched": true}\n{"matched": false}',
+        ):
+            with (
+                self.subTest(reply=reply),
+                mock.patch.object(
+                    ev, "_REGEX_WORKER", f"import os; os.write(1, {reply!r})"
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    ev.EvalRefusal, "invalid regex worker response"
+                ):
+                    ev._bounded_regex("x", "x")
+
+    def test_worker_and_execution_budgets_bind_identity_without_changing_metrics(self):
+        first = run()
+        changes = (
+            ("_REGEX_WORKER", ev._REGEX_WORKER + "\n# equivalent worker revision\n"),
+            ("REGEX_TIMEOUT_SECONDS", 3.0),
+            ("REGEX_REPLY_LIMIT_BYTES", 8192),
+            ("REGEX_STDERR_LIMIT_BYTES", 8192),
+            ("REGEX_CLEANUP_GRACE_SECONDS", 2.0),
+        )
+        for name, value in changes:
+            with self.subTest(contract=name):
+                with mock.patch.object(ev, name, value, create=True):
+                    changed = run()
+                self.assertNotEqual(first["id"], changed["id"])
+                self.assertEqual(first["holdout_digest"], changed["holdout_digest"])
+                self.assertEqual(first["results"], changed["results"])
 
 
 class ReviewEvidenceBindingTests(unittest.TestCase):

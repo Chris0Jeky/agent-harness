@@ -194,12 +194,15 @@ def _run_posix_policy_process(
         stderr_stream.close()
         timed_out = _wait_policy_process(process, timeout_seconds, output_pipes)
     finally:
+        group_permission_error = None
         try:
             os.killpg(process.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            # macOS answers EPERM, not ESRCH, for a group whose only member is an
-            # unreaped zombie; the wait below reaps it and still proves the group gone.
+        except ProcessLookupError:
             pass
+        except PermissionError as exc:
+            # macOS may answer EPERM for a zombie-only group. Reap the root,
+            # then require proof that the group vanished before tolerating it.
+            group_permission_error = exc
         try:
             process.wait(timeout=_PROCESS_CLEANUP_GRACE_SECONDS)
         except subprocess.TimeoutExpired:
@@ -208,6 +211,19 @@ def _run_posix_policy_process(
                 process.wait(timeout=_PROCESS_CLEANUP_GRACE_SECONDS)
             except subprocess.TimeoutExpired as exc:
                 raise OSError("policy process group did not terminate") from exc
+        if group_permission_error is not None:
+            try:
+                os.killpg(process.pid, 0)
+            except ProcessLookupError:
+                pass
+            except PermissionError as exc:
+                raise OSError(
+                    "policy process group cleanup could not be verified"
+                ) from exc
+            else:
+                raise OSError(
+                    "policy process group survived denied cleanup"
+                ) from group_permission_error
     return process.returncode, timed_out
 
 
@@ -340,6 +356,8 @@ def _run_windows_policy_process(
             process = subprocess.Popen(
                 [
                     sys.executable,
+                    "-I",
+                    "-S",
                     "-c",
                     _WINDOWS_POLICY_WRAPPER,
                     str(int(event)),
