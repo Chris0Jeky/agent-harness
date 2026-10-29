@@ -10649,6 +10649,42 @@ def bundle_path_device(path: Path) -> int:
         return metadata.st_dev
 
 
+def preflight_bundle_destination_lookup(
+    parent: Path, components: list[dict[str, Any]]
+) -> None:
+    """Compare missing target/recovery names using their native directory lookup.
+
+    Call only after existing source/live/recovery identities are proven disjoint:
+    the shared skill helper may create removable name-only probes in an ancestor.
+    """
+    try:
+        recovery = skill_destination_anchor(parent, "bundle recovery")
+        targets = [
+            (
+                component["target"],
+                skill_destination_anchor(component["target"], "bundle destination"),
+            )
+            for component in components
+        ]
+        for index, (target, entry) in enumerate(targets):
+            if skill_destination_within(entry, recovery) or skill_destination_within(
+                recovery, entry
+            ):
+                raise HarnessError(
+                    f"bundle recovery root overlaps a destination by native lookup: "
+                    f"{parent}; {target}"
+                )
+            for earlier, earlier_entry in targets[:index]:
+                if skill_destination_within(
+                    entry, earlier_entry
+                ) or skill_destination_within(earlier_entry, entry):
+                    raise HarnessError(
+                        f"bundle destinations overlap by native lookup: {earlier}; {target}"
+                    )
+    except OSError as exc:
+        raise HarnessError(f"cannot compare bundle destination lookup: {exc}") from exc
+
+
 def preflight_bundle_storage(
     parent: Path, components: list[dict[str, Any]], *, installing: bool
 ) -> None:
@@ -10683,6 +10719,7 @@ def preflight_bundle_storage(
                 f"bundle requires same-filesystem rename: target {target}; "
                 f"recovery storage {parent}; choose homes on the same filesystem"
             )
+    preflight_bundle_destination_lookup(parent, components)
 
 
 def validate_bundle_targets(
@@ -10817,6 +10854,14 @@ def restore_failed_bundle_install(applied: list[dict[str, Any]]) -> list[str]:
         except (HarnessError, OSError) as exc:
             problems.append(f"cannot restore {target}: {exc}")
     return problems
+
+
+def bundle_recovery_component_map(components: list[dict[str, Any]]) -> str:
+    """Identify numbered recovery entries even when no receipt was published."""
+    return "; ".join(
+        f"{index:04d} -> {component['target']}"
+        for index, component in enumerate(components)
+    )
 
 
 def apply_sync_bundle(
@@ -10980,7 +11025,10 @@ def apply_sync_bundle(
         )
     except (HarnessError, OSError) as exc:
         problems = restore_failed_bundle_install(applied)
-        suffix = f"; recovery backups: {backup_root}"
+        suffix = (
+            f"; recovery backups: {backup_root}; recovery component map: "
+            f"{bundle_recovery_component_map(components)}"
+        )
         if problems:
             suffix += f"; restore problems: {'; '.join(problems)}"
         if isinstance(exc, HarnessError):
@@ -11178,7 +11226,12 @@ def rollback_sync_bundle(
                 recovery.rename(target)
             except (HarnessError, OSError) as restore_exc:
                 problems.append(f"cannot recover {target}: {restore_exc}")
-        suffix = f"; recovery problems: {'; '.join(problems)}" if problems else ""
+        suffix = (
+            f"; rollback recovery: {transaction_root / 'installed'}; "
+            f"recovery component map: {bundle_recovery_component_map(components)}"
+        )
+        if problems:
+            suffix += f"; recovery problems: {'; '.join(problems)}"
         raise HarnessError(f"bundle rollback failed: {exc}{suffix}") from exc
     print(f"bundle rollback recovery: {transaction_root / 'installed'}")
 
