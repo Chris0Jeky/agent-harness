@@ -1,0 +1,77 @@
+{
+  "_expect": "observational comparison never emits a gate",
+  "arms": {
+    "baseline": {
+      "clean_rate": 1.0,
+      "confirmed": 20,
+      "correction_rate": 0.0,
+      "matured": 20,
+      "precision": 1.0,
+      "refuted": 0,
+      "regression_rate": 0.0,
+      "revert_rate": 0.0,
+      "runs": 20,
+      "seconds_mean": 1200.0,
+      "success_rate": 1.0,
+      "tokens_mean": 13800.0
+    },
+    "candidate": {
+      "clean_rate": 1.0,
+      "confirmed": 20,
+      "correction_rate": 0.0,
+      "matured": 20,
+      "precision": 1.0,
+      "refuted": 0,
+      "regression_rate": 0.0,
+      "revert_rate": 0.0,
+      "runs": 20,
+      "seconds_mean": 1200.0,
+      "success_rate": 1.0,
+      "tokens_mean": 13800.0
+    }
+  },
+  "at": "2026-09-20T00:00:00Z",
+  "baseline_variant": "baseline:example",
+  "candidate": "lc_example-0001",
+  "candidate_variant": "gen:gen_example-0001",
+  "evidence_scope": "observational",
+  "excluded_training": 0,
+  "gate": {
+    "at": "2026-09-20T00:00:00Z",
+    "evaluator": {
+      "kind": "oracle",
+      "model": null,
+      "runtime": "tool",
+      "session": "sys_1f969bcb63cc55a5"
+    },
+    "gate": "canary",
+    "metrics": {
+      "baseline_revert_rate": 0.0,
+      "baseline_runs": 20,
+      "baseline_success_rate": 1.0,
+      "candidate_revert_rate": 0.0,
+      "candidate_runs": 20,
+      "candidate_success_rate": 1.0
+    },
+    "ref": "system-run:sys_1f969bcb63cc55a5",
+    "result": "pass",
+    "summary": "20 candidate vs 20 baseline runs: no regression beyond tolerance"
+  },
+  "id": "sys_1f969bcb63cc55a5",
+  "policy": {
+    "max_correction_rise": 0.0,
+    "max_revert_rise": 0.0,
+    "max_success_drop": 0.0,
+    "min_matured": 10,
+    "min_runs": 20
+  },
+  "producer": {
+    "lane": "agent-harness",
+    "model": "agent-harness:scripts/learning_system.py@1",
+    "runtime": "tool",
+    "session": "sys_1f969bcb63cc55a5"
+  },
+  "reasons": [],
+  "schema": "system-run/v1",
+  "verdict": "pass"
+}

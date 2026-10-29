@@ -261,11 +261,14 @@ or a large otherwise-valid corpus can exceed them. Overflow stops capture, invok
 process-family cleanup, and returns `process-output-limit` with every policy decision indeterminate
 (`output-limit` for a recorded hook). Continuously available output after root cleanup also fails
 at the one-second drain budget. Final reads and diagnostics stay bounded; only stdin uses
-temporary storage. On Windows an event-gated supervisor enters a
+temporary storage. On Windows an isolated Python supervisor (`-I -S`, ignoring ambient
+Python imports and site startup hooks) waits on an event and enters a
 kill-on-close Job Object before it can launch the policy and contains the policy process family. On
 POSIX the policy root starts in a new session and root process group; timeout and normal root
 completion send `SIGKILL` only to that root process group with bounded cleanup, so descendants that
-remain in it cannot outlive replay. A descendant that calls `setpgid`/`setpgrp` to create another
+remain in it cannot outlive a successful replay. A permission-denied group kill is tolerated only
+when the group is proved absent after reaping its root; surviving or uninspectable groups make the
+result indeterminate. A descendant that calls `setpgid`/`setpgrp` to create another
 group in the same session, or `setsid` to create another session, leaves POSIX v0 containment and
 may continue from a deleted snapshot. Capture closes its pipe readers when replay returns, so
 escaped writers cannot keep consuming replay-owned output storage. Their own filesystem/network

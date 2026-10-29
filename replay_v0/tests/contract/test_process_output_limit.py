@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 import subprocess
 import json
+import os
+import signal
 from pathlib import Path
 import tempfile
 import time
@@ -112,10 +114,66 @@ class ProcessOutputLimitTests(unittest.TestCase):
     @unittest.skipIf(sys.platform == "win32", "POSIX process groups only")
     def test_zombie_group_permission_error_keeps_the_output_limit(self):
         with mock.patch.object(
-            policy_sources.os, "killpg", side_effect=PermissionError(1, "EPERM")
-        ):
+            policy_sources.os,
+            "killpg",
+            side_effect=[PermissionError(1, "EPERM"), ProcessLookupError()],
+        ) as killpg:
             result = self.evaluate("import os; os.write(1, b'x' * 65536)")
         self.assert_output_limit(result)
+        self.assertEqual(
+            [signal.SIGKILL, 0], [call.args[1] for call in killpg.call_args_list]
+        )
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX process groups only")
+    def test_group_permission_error_without_absence_proof_fails_closed(self):
+        with mock.patch.object(
+            policy_sources.os, "killpg", side_effect=PermissionError(1, "EPERM")
+        ):
+            result = ProcessDecisionSource([*FIXTURE_COMMAND, "success"]).evaluate(
+                EVENTS
+            )
+        self.assertFalse(result.is_valid)
+        self.assertEqual(
+            ["process-start-failed"], [failure.code for failure in result.failures]
+        )
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX process groups only")
+    def test_group_permission_error_with_a_live_descendant_fails_closed(self):
+        real_killpg = os.killpg
+
+        def denied_cleanup(group, signum):
+            if signum == signal.SIGKILL:
+                raise PermissionError(1, "synthetic group permission denial")
+            return real_killpg(group, signum)
+
+        with tempfile.TemporaryDirectory() as raw:
+            pid_path = Path(raw) / "child.pid"
+            child_pid = None
+            oracle = fixtures.ProcessSourceTests()
+            try:
+                with mock.patch.object(
+                    policy_sources.os, "killpg", side_effect=denied_cleanup
+                ):
+                    result = ProcessDecisionSource(
+                        [*FIXTURE_COMMAND, "descendant-exit", str(pid_path)],
+                        timeout_seconds=3.0,
+                    ).evaluate(EVENTS)
+                child_pid, _state = oracle.require_child_startup(
+                    pid_path, pid_path.with_suffix(".json")
+                )
+                self.assertTrue(oracle._process_is_running(child_pid))
+                self.assertFalse(
+                    result.is_valid, "unverified group cleanup cannot yield decisions"
+                )
+                self.assertEqual(
+                    ["indeterminate", "indeterminate"], oracle.effects(result)
+                )
+            finally:
+                if child_pid is None and pid_path.is_file():
+                    child_pid = int(pid_path.read_text(encoding="ascii"))
+                if child_pid is not None:
+                    os.kill(child_pid, signal.SIGKILL)
+                    oracle.assert_process_stopped(child_pid)
 
     def test_capture_uses_temporary_storage_only_for_stdin(self):
         with mock.patch.object(
