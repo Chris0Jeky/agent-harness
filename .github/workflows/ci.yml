@@ -59,6 +59,28 @@ jobs:
       - name: Run deny-floor smoke matrix
         run: python templates/hooks/smoke_test.py
 
+  bundle-native-bind:
+    name: bundle-native-bind
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+      - name: Require native bind-mount regression checks in a private namespace
+        shell: bash
+        run: |
+          HARNESS_NATIVE_PYTHON="$(command -v python)"
+          sudo --non-interactive timeout --signal=TERM --kill-after=5s 60s \
+            unshare --mount --propagation private -- \
+            env HARNESS_REQUIRE_NATIVE_BIND_MOUNTS=1 \
+            "$HARNESS_NATIVE_PYTHON" -m unittest discover -s tests \
+            -p "test_bundle_native_bind.py" -v
 
   replay-package:
     name: replay-package (${{ matrix.os }})

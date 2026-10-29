@@ -755,6 +755,11 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   selected tree pairs are compared bidirectionally before backup or pruning, including
   live descendants that alias source descendants. Lexical resolution alone is insufficient.
   They do not walk unrelated home trees.
+  The Linux `bundle-native-bind` CI job verifies real same-device bind aliases in a
+  disposable private mount namespace: both preview and apply refuse before name probes,
+  recovery reservation, or source changes, while a disjoint bound home installs successfully.
+  Ordinary test discovery skips this privileged proof; the dedicated job requires execution
+  and fails on unavailable namespace/mount setup or cleanup rather than treating it as a skip.
   After existing identities pass, missing destination and recovery spellings are compared
   using removable name-only probes under their nearest existing directory ancestors. The
   ancestor's native lookup, including per-directory Windows case sensitivity, determines

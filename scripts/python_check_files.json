@@ -27,6 +27,7 @@
   "tests/test_bundle_rollback_storage.py",
   "tests/test_bundle_preflight_recovery.py",
   "tests/test_bundle_destination_lookup.py",
+  "tests/test_bundle_native_bind.py",
   "tests/test_bundle_transaction_recovery.py",
   "tests/test_skill_preflight_unavailable_root.py",
   "tests/test_replay_decoder_contract.py",
