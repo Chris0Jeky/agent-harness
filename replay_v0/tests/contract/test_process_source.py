@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 from pathlib import Path
@@ -464,6 +465,83 @@ class ProcessSourceTests(unittest.TestCase):
 class FixtureStartupOracleTests(unittest.TestCase):
     """Exercise the containment tests' oracle, not a substitute process runner."""
 
+    @unittest.skipUnless(
+        os.name != "nt" and hasattr(os, "setpgrp"), "POSIX setpgrp semantics"
+    )
+    def test_capture_ack_is_published_only_after_its_contents(self) -> None:
+        # Pause the real child immediately after its acknowledgement writer opens
+        # the file. Publishing that pathname now lets the parent read empty bytes.
+        child_code = next(
+            ast.literal_eval(node.value)
+            for node in ast.parse(FIXTURE.read_text(encoding="utf-8")).body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "SET_PGRP_CHILD"
+                for target in node.targets
+            )
+        )
+        program = """
+from pathlib import Path
+import sys, time
+original_write = Path.write_text
+def paused_write(path, text, *args, **kwargs):
+    if text not in {"capture-closed", "wrote-after-return"}:
+        return original_write(path, text, *args, **kwargs)
+    with path.open("w", encoding="ascii") as stream:
+        original_write(Path(sys.argv[4]), "opened", encoding="ascii")
+        deadline = time.monotonic() + 5
+        while not Path(sys.argv[5]).is_file():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("acknowledgement writer was not released")
+            time.sleep(0.01)
+        return stream.write(text)
+Path.write_text = paused_write
+"""
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            state, trigger, ack, opened, release = (
+                directory / name
+                for name in ("state.json", "trigger", "result.ack", "opened", "release")
+            )
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-I",
+                    "-S",
+                    "-c",
+                    program + f"\nexec({child_code!r})\n",
+                    *map(str, (state, trigger, ack, opened, release)),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                process.stdout.close()
+                trigger.write_text("write", encoding="ascii")
+                deadline = time.monotonic() + 5
+                while not opened.is_file():
+                    self.assertIsNone(process.poll(), "child failed before writing ack")
+                    self.assertLess(
+                        time.monotonic(), deadline, "ack writer never opened"
+                    )
+                    time.sleep(0.01)
+                self.assertFalse(
+                    ack.exists(), "ack pathname exposes incomplete contents"
+                )
+                release.write_text("release", encoding="ascii")
+                while not ack.is_file():
+                    self.assertIsNone(
+                        process.poll(), "child failed before publishing ack"
+                    )
+                    self.assertLess(
+                        time.monotonic(), deadline, "ack was never published"
+                    )
+                    time.sleep(0.01)
+                self.assertEqual("capture-closed", ack.read_text(encoding="ascii"))
+            finally:
+                process.kill()
+                process.wait(timeout=5)
+
     def assert_startup_failure(self, test_name: str, code: str) -> None:
         run_process = policy_sources._run_policy_process
         observed_timeouts = []
@@ -541,6 +619,102 @@ class FixtureStartupOracleTests(unittest.TestCase):
             "Path(sys.argv[1]).write_text(str(child.pid), encoding='ascii'); "
             "time.sleep(10)",
         )
+
+
+class WindowsSupervisorStartupTests(unittest.TestCase):
+    def test_supervisor_launch_ignores_ambient_python_imports(self) -> None:
+        # Capture the real Windows launcher command before WinAPI-dependent work,
+        # then exercise its Python startup on every supported test host.
+        class CapturedLaunch(Exception):
+            pass
+
+        command = []
+
+        def capture(argv, **_kwargs):
+            command.extend(argv)
+            raise CapturedLaunch
+
+        kernel32 = mock.Mock()
+        kernel32.CreateEventW.return_value = 2
+        with (
+            mock.patch.object(
+                policy_sources, "_windows_kernel32", return_value=kernel32
+            ),
+            mock.patch.object(
+                policy_sources, "_create_windows_kill_job", return_value=1
+            ),
+            mock.patch.object(os, "set_handle_inheritable", create=True),
+            mock.patch.object(subprocess, "STARTUPINFO", create=True),
+            mock.patch.object(subprocess, "Popen", side_effect=capture),
+            self.assertRaises(CapturedLaunch),
+        ):
+            policy_sources._run_windows_policy_process(
+                ["synthetic-policy"],
+                stdin_stream=None,
+                stdout_stream=None,
+                stderr_stream=None,
+                output_pipes=(),
+                timeout_seconds=2.0,
+                cwd=None,
+                environment=None,
+            )
+
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            sentinel = directory / "ambient-import-ran"
+            (directory / "json.py").write_text(
+                "from pathlib import Path\n"
+                f"Path({str(sentinel)!r}).write_text('imported', encoding='ascii')\n"
+                "raise RuntimeError('ambient json entered supervisor startup')\n",
+                encoding="utf-8",
+            )
+            environment = {**os.environ, "PYTHONPATH": str(directory)}
+            control = subprocess.run(
+                [sys.executable, "-S", "-c", "import json"],
+                cwd=directory,
+                env=environment,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+            self.assertNotEqual(0, control.returncode)
+            self.assertTrue(
+                sentinel.is_file(), "ambient startup trap was not exercised"
+            )
+            sentinel.unlink()
+            probe = subprocess.run(
+                [
+                    *command[: command.index("-c") + 1],
+                    "import json, sys; print(sys.flags.isolated, 'site' in sys.modules)",
+                ],
+                cwd=directory,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            self.assertEqual(0, probe.returncode, probe.stderr)
+            self.assertEqual("1 False", probe.stdout.strip())
+            self.assertFalse(sentinel.exists())
+
+    @unittest.skipUnless(os.name == "nt", "native Windows supervisor and Job Object")
+    def test_native_supervisor_ignores_host_pythonpath(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            sentinel = directory / "ambient-import-ran"
+            (directory / "json.py").write_text(
+                "from pathlib import Path\n"
+                f"Path({str(sentinel)!r}).write_text('imported', encoding='ascii')\n"
+                "raise RuntimeError('ambient json entered supervisor startup')\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"PYTHONPATH": str(directory)}):
+                result = ProcessDecisionSource([*FIXTURE_COMMAND, "success"]).evaluate(
+                    EVENTS
+                )
+            self.assertTrue(result.is_valid, result.failures)
+            self.assertFalse(sentinel.exists())
 
 
 if __name__ == "__main__":

@@ -32,9 +32,12 @@ import hashlib
 import importlib.util
 import json
 import math
+import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
+import time
 
 _SPEC = importlib.util.spec_from_file_location(
     "learning_contracts", Path(__file__).resolve().with_name("learning_contracts.py")
@@ -46,6 +49,9 @@ RUN_SCHEMA = "eval-run/v1"
 TOOL = "agent-harness:scripts/learning_eval.py@2"
 GATES = ("offline_eval", "replay", "retrieval_regression")
 REGEX_TIMEOUT_SECONDS = 2.0
+REGEX_REPLY_LIMIT_BYTES = 4096
+REGEX_STDERR_LIMIT_BYTES = 4096
+REGEX_CLEANUP_GRACE_SECONDS = 1.0
 _REGEX_WORKER = """
 import json, re, sys
 try:
@@ -68,18 +74,126 @@ class EvalRefusal(Exception):
     """The run cannot be judged honestly (exit 2); no report is written."""
 
 
+class _RegexCapture:
+    """Poll a worker pipe without retaining more than its reply budget."""
+
+    def __init__(self, stream, limit):
+        self.stream = stream
+        self.limit = limit
+        self.data = bytearray()
+        if os.name == "nt":
+            import ctypes
+            import msvcrt
+            from ctypes import wintypes
+
+            self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            self.kernel32.PeekNamedPipe.argtypes = (
+                wintypes.HANDLE,
+                ctypes.c_void_p,
+                wintypes.DWORD,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+            )
+            self.kernel32.PeekNamedPipe.restype = wintypes.BOOL
+            self.handle = msvcrt.get_osfhandle(stream.fileno())
+            self.available = wintypes.DWORD()
+        else:
+            os.set_blocking(stream.fileno(), False)
+
+    def drain(self):
+        # A bounded turn leaves deadline checks reachable even for a busy writer.
+        for _ in range(16):
+            remaining = self.limit - len(self.data)
+            size = min(8192, remaining + 1)
+            if os.name == "nt":
+                import ctypes
+
+                if not self.kernel32.PeekNamedPipe(
+                    self.handle, None, 0, None, ctypes.byref(self.available), None
+                ):
+                    error = ctypes.get_last_error()
+                    if error == 109:  # The worker closed its write handle.
+                        return
+                    raise ctypes.WinError(error)
+                size = min(size, self.available.value)
+                if not size:
+                    return
+            try:
+                chunk = os.read(self.stream.fileno(), size)
+            except BlockingIOError:
+                return
+            if not chunk:
+                return
+            if len(chunk) > remaining:
+                raise EvalRefusal("regex worker output exceeded its capture quota")
+            self.data.extend(chunk)
+
+
+def _run_regex_worker(pattern, text):
+    argv = [sys.executable, "-I", "-S", "-c", _REGEX_WORKER]
+    # Only the already-supplied input uses temporary storage. Worker output stays
+    # in fixed-size pipe captures, so neither RAM nor disk grows with its output.
+    with tempfile.TemporaryFile() as input_stream:
+        input_stream.write(json.dumps([pattern, text]).encode("utf-8"))
+        input_stream.seek(0)
+        process = subprocess.Popen(
+            argv,
+            stdin=input_stream,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+            shell=False,
+        )
+        try:
+            deadline = time.monotonic() + REGEX_TIMEOUT_SECONDS
+            captures = (
+                _RegexCapture(process.stdout, REGEX_REPLY_LIMIT_BYTES),
+                _RegexCapture(process.stderr, REGEX_STDERR_LIMIT_BYTES),
+            )
+            while True:
+                for capture in captures:
+                    capture.drain()
+                if process.poll() is not None:
+                    # Recheck queued bytes after observing exit, without waiting
+                    # for EOF from any inherited pipe writer.
+                    for capture in captures:
+                        capture.drain()
+                    return subprocess.CompletedProcess(
+                        argv,
+                        process.returncode,
+                        bytes(captures[0].data),
+                        bytes(captures[1].data),
+                    )
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(argv, REGEX_TIMEOUT_SECONDS)
+                time.sleep(min(0.01, remaining))
+        finally:
+            try:
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=REGEX_CLEANUP_GRACE_SECONDS)
+            except subprocess.TimeoutExpired as exc:
+                raise OSError("regex worker did not terminate") from exc
+            finally:
+                process.stdout.close()
+                process.stderr.close()
+
+
+def _unique_regex_response(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate regex response member")
+        result[key] = value
+    return result
+
+
 def _bounded_regex(pattern, text=None):
     """Compile/search outside this process; a deadline kills and reaps the worker."""
     try:
-        completed = subprocess.run(
-            [sys.executable, "-I", "-S", "-c", _REGEX_WORKER],
-            input=json.dumps([pattern, text]),
-            capture_output=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=REGEX_TIMEOUT_SECONDS,
-            check=False,
-        )
+        completed = _run_regex_worker(pattern, text)
     except subprocess.TimeoutExpired as exc:
         raise EvalRefusal(f"regex timeout after {REGEX_TIMEOUT_SECONDS:g}s") from exc
     except OSError as exc:
@@ -87,8 +201,10 @@ def _bounded_regex(pattern, text=None):
     if completed.returncode != 0:
         raise EvalRefusal("regex worker failed; no grade is available")
     try:
-        result = json.loads(completed.stdout)
-    except (ValueError, TypeError) as exc:
+        result = json.loads(
+            completed.stdout.decode("utf-8"), object_pairs_hook=_unique_regex_response
+        )
+    except (ValueError, TypeError, UnicodeError) as exc:
         raise EvalRefusal("invalid regex worker response") from exc
     if isinstance(result, dict) and isinstance(result.get("error"), str):
         raise EvalRefusal(
@@ -585,6 +701,13 @@ def evaluate(
     # of baseline/candidate outputs that collides when the arms are exchanged.
     identity = {
         "tool": TOOL,
+        "regex_execution": {
+            "worker_sha256": hashlib.sha256(_REGEX_WORKER.encode("utf-8")).hexdigest(),
+            "timeout_seconds": REGEX_TIMEOUT_SECONDS,
+            "reply_limit_bytes": REGEX_REPLY_LIMIT_BYTES,
+            "stderr_limit_bytes": REGEX_STDERR_LIMIT_BYTES,
+            "cleanup_grace_seconds": REGEX_CLEANUP_GRACE_SECONDS,
+        },
         "candidate": candidate["id"],
         "genome": genome["id"] if genome else None,
         "baseline_ref": baseline["variant_ref"],

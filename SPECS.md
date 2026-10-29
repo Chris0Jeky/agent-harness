@@ -1112,6 +1112,14 @@ it is returned. `schemas/learning/examples/memory-eval/` is a synthetic suite co
 LongMemEval-V2 categories across the extraction, retrieval and behavioural layers, with a
 training leak and a cluster leak the evaluator must drop.
 
+Regex compilation and matching run in an isolated Python worker (`-I -S`) with a two-second
+deadline and a one-second cleanup grace. Its stdout reply and stderr diagnostics each have a
+4 KiB capture quota, enforced while reading; output overflow, timeout, startup failure and
+malformed or duplicate-member JSON refuse the evaluation without writing a report. The run ID
+binds the worker source SHA-256 and all four execution budgets as well as the selected case
+contracts and role-labelled baseline/candidate evidence. Changing that execution contract
+therefore changes the run ID even when the hold-out membership and measured results agree.
+
 **Receipts, not claims** (K3). The path to live carries `promotion-receipt/v1` receipts, written
 by the applier or the store, never by the learner: `installed` (the destination repository, merge
 commit, path and blob sha256 on `origin/main`), `observed` (an attributed use), `matured` (a window
