@@ -755,11 +755,18 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   selected tree pairs are compared bidirectionally before backup or pruning, including
   live descendants that alias source descendants. Lexical resolution alone is insufficient.
   They do not walk unrelated home trees.
+  After existing identities pass, missing destination and recovery spellings are compared
+  using removable name-only probes under their nearest existing directory ancestors. The
+  ancestor's native lookup, including per-directory Windows case sensitivity, determines
+  overlap; case folding alone does not. Lookup or probe cleanup failure refuses installation.
   Sources may be copied from another filesystem; live targets and rename recovery storage
   must share a filesystem. Device equality is necessary, not proof every rename will succeed.
   A post-promotion inspection error follows the same quarantine/restore path as a digest
   mismatch. Failed quarantine leaves live state explicitly unverified and names recovery
   storage; it does not follow an aliased target parent or report successful installation.
+  A failed live transaction reports its recovery directory and the numbered component-to-target
+  mapping even when it cannot publish a receipt. Restoration preserves backups and skips a live
+  target that has drifted from the installed bytes; any skipped or failed restore is reported.
 - `harness.py sync-global --config-root <claude-config> --only bundle:muse-runtime
   --rollback-receipt <path> [--apply]` — previews or executes receipt rollback. Before any target
   moves, every live target must still equal its installed digest and every present-state backup
@@ -768,6 +775,9 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   source, destination, and backup locations are re-parsed as canonical relative paths under the
   current logical roots or receipt directory. Rollback is compare-and-swap recovery, not a claim
   of lock-free exclusion, runtime health, or successful native Muse execution.
+  If rollback fails after moving live bytes, recovery attempts to put those installed bytes
+  back. Its diagnostic names the retained `rollback-<id>/installed` directory and component
+  mapping, including when drift or another filesystem error prevents automatic recovery.
 - `harness.py doctor [--repo <path>]` — checks live global guidance/floor topology, core
   executables, and optionally one repo-local Codex floor definition plus the static base-user and
   active-project MCP topology. It rejects active command-backed names duplicated across those
