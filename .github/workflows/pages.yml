@@ -12,6 +12,9 @@ on:
       - "docs/**"
       - "scripts/build_docs_site.py"
       - "scripts/docs_site/**"
+      - "examples/toy-guard/report/**"
+      - "tests/docs_site/**"
+      - "tests/test_build_docs_site.py"
       - ".github/workflows/pages.yml"
   pull_request:
     paths:
@@ -19,6 +22,9 @@ on:
       - "docs/**"
       - "scripts/build_docs_site.py"
       - "scripts/docs_site/**"
+      - "examples/toy-guard/report/**"
+      - "tests/docs_site/**"
+      - "tests/test_build_docs_site.py"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -48,6 +54,9 @@ jobs:
 
       - name: Stage the allowlisted docs
         run: python scripts/build_docs_site.py --out _site_src
+
+      - name: Check the recorded replay lab
+        run: node --test tests/docs_site/replay_lab.test.cjs
 
       - name: Configure Pages
         if: github.event_name != 'pull_request'
