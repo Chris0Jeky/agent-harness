@@ -46,6 +46,7 @@ from replay_v0.policy_sources import (
     _PROCESS_STDOUT_BASE_BYTES,
     _PROCESS_STDOUT_EVENT_BYTES,
     _PROCESS_STDOUT_LIMIT_BYTES,
+    executable_companion_bindings,
     validate_recorded_manifest,
 )
 from replay_v0.reports import (
@@ -62,7 +63,7 @@ DIAGNOSTIC_LINES = 20
 DIAGNOSTIC_CHARS = 300
 
 DEFAULT_FAIL_ON = ("newly-allowed", "newly-indeterminate")
-PROCESS_IDENTITY_VERSION = "process-policy-identity.v11"
+PROCESS_IDENTITY_VERSION = "process-policy-identity.v12"
 PROCESS_ENVIRONMENT = {
     "PYTHONDONTWRITEBYTECODE": "1",
     "PYTHONHASHSEED": "0",
@@ -303,6 +304,7 @@ def _load_process_source(
         policy_tree_digest = sha256_tree(policy_tree_path)
         executable_digest = sha256_file(bound_executable_path)
         executable_permissions = permission_bits(bound_executable_path)
+        executable_companions = executable_companion_bindings(bound_executable_path)
     except OSError as exc:
         raise ReplayInputError(
             "process executable or policy file could not be read"
@@ -322,6 +324,10 @@ def _load_process_source(
             "permission_bits": executable_permissions,
             "name": invocation_name,
             "sha256": executable_digest,
+            "companions": [
+                {"name": name, "sha256": digest, "permission_bits": mode}
+                for name, digest, mode in executable_companions
+            ],
         },
         "arguments": argv[1:-1],
         "policy": {
@@ -365,6 +371,7 @@ def _load_process_source(
             executable_invocation_name=invocation_name,
             executable_sha256=executable_digest,
             executable_permissions=executable_permissions,
+            executable_companions=executable_companions,
             policy_tree_path=policy_tree_path,
             policy_sha256=policy_digest,
             policy_tree_sha256=policy_tree_digest,

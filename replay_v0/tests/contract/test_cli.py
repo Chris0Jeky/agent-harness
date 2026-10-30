@@ -1033,6 +1033,139 @@ for index, event in enumerate(events):
             [decision["effect"] for decision in result.decisions],
         )
 
+    def companion_fixture(
+        self, directory: Path, library: str = "helper.so"
+    ) -> tuple[Path, Path, Path]:
+        tools = directory / "tools"
+        tools.mkdir()
+        executable = tools / "policy-runner"
+        executable.write_bytes(b"#!/bin/sh\nexit 0\n")
+        os.chmod(executable, 0o755)
+        companion = tools / library
+        companion.write_bytes(b"first library\n")
+        # Outside tools/: the policy parent tree would otherwise bind these bytes.
+        policy_tree = directory / "policy"
+        policy_tree.mkdir()
+        policy = policy_tree / "policy.py"
+        policy.write_text("pass\n", encoding="utf-8", newline="\n")
+        return executable, companion, policy
+
+    def test_process_identity_binds_every_copied_companion(self) -> None:
+        for library in ("helper.so", "helper.so.1", "helper.dll", "helper.dylib"):
+            with self.subTest(library=library):
+                with tempfile.TemporaryDirectory() as raw_directory:
+                    executable, companion, policy = self.companion_fixture(
+                        Path(raw_directory), library
+                    )
+                    argv = f"{executable},{policy}"
+                    first = _load_process_source(argv, 5.0).identity
+                    self.assertEqual(first, _load_process_source(argv, 5.0).identity)
+
+                    companion.write_bytes(b"second library\n")
+                    changed = _load_process_source(argv, 5.0).identity
+                    self.assertNotEqual(first["sha256"], changed["sha256"])
+
+                    companion.rename(companion.with_name(f"renamed-{library}"))
+                    renamed = _load_process_source(argv, 5.0).identity
+                    self.assertNotEqual(changed["sha256"], renamed["sha256"])
+
+    def test_process_identity_ignores_uncopied_executable_siblings(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            executable, _companion, policy = self.companion_fixture(Path(raw_directory))
+            argv = f"{executable},{policy}"
+            before = _load_process_source(argv, 5.0).identity
+            (executable.parent / "notes.txt").write_text(
+                "unrelated\n", encoding="utf-8"
+            )
+            self.assertEqual(before, _load_process_source(argv, 5.0).identity)
+
+    def test_process_companion_changes_before_snapshot_refuse_execution(self) -> None:
+        def change(companion: Path) -> None:
+            companion.write_bytes(b"second library\n")
+
+        def remove(companion: Path) -> None:
+            companion.unlink()
+
+        def add(companion: Path) -> None:
+            companion.with_name("added.so").write_bytes(b"added\n")
+
+        for mutation in (change, remove, add):
+            with self.subTest(mutation=mutation.__name__):
+                with tempfile.TemporaryDirectory() as raw_directory:
+                    executable, companion, policy = self.companion_fixture(
+                        Path(raw_directory)
+                    )
+                    loaded = _load_process_source(f"{executable},{policy}", 5.0)
+                    mutation(companion)
+                    with mock.patch(
+                        "replay_v0.policy_sources._run_policy_process"
+                    ) as process_run:
+                        result = loaded.source.evaluate(EVENTS)
+                process_run.assert_not_called()
+                self.assertEqual(
+                    ["process-input-changed"],
+                    [failure.code for failure in result.failures],
+                )
+
+    def test_process_companion_changes_after_snapshot_invalidate_decisions(
+        self,
+    ) -> None:
+        def restore_mtime(path: Path) -> None:
+            metadata = path.stat()
+            os.utime(path, ns=(metadata.st_atime_ns, policy_sources.SNAPSHOT_MTIME_NS))
+
+        def change(directory: Path) -> None:
+            (directory / "helper.so").write_bytes(b"second library\n")
+
+        def remove(directory: Path) -> None:
+            (directory / "helper.so").unlink()
+
+        def add(directory: Path) -> None:
+            (directory / "added.bin").write_bytes(b"added\n")
+
+        for mutation in (change, remove, add):
+            with self.subTest(mutation=mutation.__name__):
+                with tempfile.TemporaryDirectory() as raw_directory:
+                    executable, _companion, policy = self.companion_fixture(
+                        Path(raw_directory)
+                    )
+                    loaded = _load_process_source(f"{executable},{policy}", 5.0)
+
+                    def mutate_snapshot(events, *, argv, cwd, mutate=mutation):
+                        directory = Path(argv[0]).parent
+                        mutate(directory)
+                        for entry in directory.iterdir():
+                            restore_mtime(entry)
+                        restore_mtime(directory)
+                        return policy_sources.PolicySourceResult(
+                            [
+                                {
+                                    "schema_version": "policy-decision.v1",
+                                    "event_id": event["event_id"],
+                                    "effect": "allow",
+                                    "reason": "Fixture.",
+                                }
+                                for event in events
+                            ],
+                            (),
+                            (),
+                        )
+
+                    with mock.patch.object(
+                        loaded.source,
+                        "_evaluate_runtime",
+                        side_effect=mutate_snapshot,
+                    ):
+                        result = loaded.source.evaluate(EVENTS)
+                self.assertEqual(
+                    ["indeterminate", "indeterminate"],
+                    [decision["effect"] for decision in result.decisions],
+                )
+                self.assertEqual(
+                    ["process-snapshot-changed"],
+                    [failure.code for failure in result.failures],
+                )
+
     def test_process_policy_tree_is_revalidated_before_execution(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
             directory = Path(raw_directory)
@@ -1527,7 +1660,7 @@ for index, event in enumerate(events):
     def test_process_identity_versions_xattr_normalization(self) -> None:
         import replay_v0.cli as cli
 
-        self.assertEqual("process-policy-identity.v11", cli.PROCESS_IDENTITY_VERSION)
+        self.assertEqual("process-policy-identity.v12", cli.PROCESS_IDENTITY_VERSION)
         with tempfile.TemporaryDirectory() as raw:
             policy = Path(raw) / "policy.py"
             policy.write_text(
