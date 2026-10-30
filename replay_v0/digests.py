@@ -18,6 +18,9 @@ def sha256_bytes(value: bytes) -> str:
 def sha256_file(path: str | Path) -> str:
     """Hash a file's exact bytes without newline or encoding normalization."""
 
+    # Opening a FIFO blocks with no timeout, and a policy can leave one behind.
+    if not stat.S_ISREG(Path(path).stat().st_mode):
+        raise OSError("file digest input must be a regular file")
     digest = hashlib.sha256()
     with Path(path).open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):

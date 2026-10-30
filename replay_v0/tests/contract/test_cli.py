@@ -1126,7 +1126,10 @@ for index, event in enumerate(events):
         def chmod(directory: Path) -> None:
             os.chmod(directory / "helper.so", 0o600)
 
-        mutations = (change, remove, add) + (() if os.name == "nt" else (chmod,))
+        def fifo(directory: Path) -> None:
+            os.mkfifo(directory / "added.bin")
+
+        mutations = (change, remove, add) + (() if os.name == "nt" else (chmod, fifo))
         for mutation in mutations:
             with self.subTest(mutation=mutation.__name__):
                 with tempfile.TemporaryDirectory() as raw_directory:
