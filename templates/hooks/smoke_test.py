@@ -7259,6 +7259,14 @@ def run_smoke():
                 "public synthetic route rejects command-line exec",
                 ["--exec", "synthetic-helper", "origin", "HEAD"],
             ),
+            (
+                "public synthetic route rejects plain force (#467)",
+                ["--force", "origin", "HEAD"],
+            ),
+            (
+                "public synthetic route rejects an abbreviated lease (#467)",
+                ["--force-w", "origin", "HEAD"],
+            ),
         ):
             remote_resolution_cases.append(
                 (

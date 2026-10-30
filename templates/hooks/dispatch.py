@@ -73,7 +73,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.8.1 (2026-10-07)"
+FLOOR_VERSION = "1.8.2 (2026-10-30)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -9356,11 +9356,8 @@ def sensitive_push_narrowing_status(
             return False, (
                 "the public synthetic publication needs exactly one explicit source"
             )
-        if any(
-            token == "--force-with-lease" or token.startswith("--force-with-lease=")
-            for token in args
-        ):
-            return False, "the public synthetic publication forbids force-with-lease"
+        if git_push_history_flags(args) & {"--force", "--force-with-lease"}:
+            return False, "the public synthetic publication forbids force pushes"
         if not destination or destination != publication["remote"]:
             return False, "the public synthetic publication remote does not match"
         configured_transport_overrides = {

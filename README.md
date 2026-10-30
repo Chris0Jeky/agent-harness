@@ -34,7 +34,7 @@ The replay lab uses the checked-in toy-guard report: 40 synthetic cases and 10 f
 | **Sync + worktree tools** | Preview installations, preserve recovery bytes and coordinate cleanup. | Installation and removal need explicit apply; ownership leases are cooperative. |
 | **Learning and evidence tools** | Produce local evaluation, outcome and review reports. | Reports do not merge, deploy or promote a floor by themselves. |
 
-The canonical dispatcher is **1.8.1 (2026-10-07)** and feature-frozen: false-positive fixes, ratified #21 slices, SPECS §6 charter repairs and owner-ratified exceptions only ([BLUEPRINT §2](BLUEPRINT.md#2-the-floor-analyzer-contract-posture-and-wiring)). New bypass families go in [`FLOOR_LIMITATIONS.md`](FLOOR_LIMITATIONS.md).
+The canonical dispatcher is **1.8.2 (2026-10-30)** and feature-frozen: false-positive fixes, ratified #21 slices, SPECS §6 charter repairs and owner-ratified exceptions only ([BLUEPRINT §2](BLUEPRINT.md#2-the-floor-analyzer-contract-posture-and-wiring)). New bypass families go in [`FLOOR_LIMITATIONS.md`](FLOOR_LIMITATIONS.md).
 
 This checkout declares **T3 / workshop** and `floor_wiring: none`: push and merge are permitted behind the review gate, and no PreTool floor runs here. Enabled consumer repos still require CWD-specific runtime trust and live canaries. `legacy/` is historical source material; do not execute it.
 
@@ -159,7 +159,7 @@ Changing `dispatch.py` means the smoke matrix, the harness unit tests, an indepe
 
 ## Status and roadmap
 
-The version the code declares is `FLOOR_VERSION` in `templates/hooks/dispatch.py`: **1.8.1 (2026-10-07)**.
+The version the code declares is `FLOOR_VERSION` in `templates/hooks/dispatch.py`: **1.8.2 (2026-10-30)**.
 
 Dated write-ups lag that constant. Read them for evidence, then check the constant before you quote a deployment:
 
