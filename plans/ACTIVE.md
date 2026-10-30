@@ -1,5 +1,20 @@
 # Active workstreams
 
+## Floor and replay repairs — 2026-10-30
+
+| Work | Source scope and remaining boundary |
+|---|---|
+| [#589](https://github.com/Chris0Jeky/agent-harness/pull/589) | Process identity v12 binds the name, bytes and mode of each library copied beside the executable, and snapshot checks cover the whole executable directory. `sha256_file` refuses non-regular files. Closes [#524](https://github.com/Chris0Jeky/agent-harness/issues/524). Native loader behaviour for a real adjacent library is not separately proven. |
+| [#590](https://github.com/Chris0Jeky/agent-harness/pull/590) | Floor source 1.8.2: the public-synthetic route refuses every force spelling ([#467](https://github.com/Chris0Jeky/agent-harness/issues/467)), and mirror config reads through the floor's git-accurate boolean parser ([#468](https://github.com/Chris0Jeky/agent-harness/issues/468) items 3 and 4). Source only: installed floors, consumer markers, trust and canaries are unchanged, and H-22 still gates deployment. |
+
+Both floor repairs are charter regressions as literally written, so the freeze stands.
+#468's other items and [#491](https://github.com/Chris0Jeky/agent-harness/issues/491) are
+documented limitations in [FLOOR_LIMITATIONS](../FLOOR_LIMITATIONS.md). No thaw is proposed:
+any repair would stay undeployed behind H-22.
+[#513](https://github.com/Chris0Jeky/agent-harness/issues/513) stays parked: a minimum share of
+recall-testing cases is a promotion-policy threshold, and
+[LEARNING_EVAL_SAFETY](../docs/LEARNING_EVAL_SAFETY.md) keeps that authority out of source repairs.
+
 ## Source maintenance checkpoint — 2026-10-29
 
 Baseline inspected: [`main@471ff6c`](https://github.com/Chris0Jeky/agent-harness/commit/471ff6c92457986b30da1091eea8e4e67613896a).
