@@ -135,10 +135,23 @@ class HelperTests(unittest.TestCase):
 
     def test_git_booleans(self):
         true = dispatch.git_config_bool_is_true
-        for value in ("", "true", "YES", "on", "1", "2", "-1", "1k"):
+        for value in (
+            "",
+            "true",
+            "YES",
+            "on",
+            "1",
+            "2",
+            "-1",
+            "1k",
+            "0x1",
+            "010",
+            "0" * 5000 + "1",
+        ):
             with self.subTest(value=value):
                 self.assertTrue(true(value))
-        for value in ("false", "no", "off", "0", "+0", "maybe"):
+        # Past 4300 decimal digits int() raises, and git rejects the value too.
+        for value in ("false", "no", "off", "0", "+0", "maybe", "0x0", "9" * 5000):
             with self.subTest(value=value):
                 self.assertFalse(true(value))
 
@@ -358,6 +371,12 @@ class ReviewRoundOneTests(unittest.TestCase):
                 (mirror, "git push --tags origin", self.WALL, "deny"),
                 (mirror, "git push origin 2>&1", self.WALL, "deny"),
                 ([("remote.origin.mirror", "2")], "git push origin", self.WALL, "deny"),
+                (
+                    [("remote.origin.mirror", "0x1")],
+                    "git push origin",
+                    self.WALL,
+                    "deny",
+                ),
                 (
                     [("remote.origin.mirror", "0")],
                     "git push origin",

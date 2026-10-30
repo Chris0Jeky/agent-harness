@@ -6766,12 +6766,8 @@ def git_push_history_flags(args: list[str]) -> set[str]:
 
 
 def git_config_bool_is_true(value: str) -> bool:
-    """Git's boolean reading: a valueless key, true/yes/on, or a non-zero integer."""
-    lowered = value.strip().lower()
-    if lowered in {"", "true", "yes", "on"}:
-        return True
-    integer = re.fullmatch(r"([-+]?\d+)[kmg]?", lowered)
-    return bool(integer) and int(integer.group(1)) != 0
+    """Git's boolean reading, with an empty value read as a valueless (true) key."""
+    return not value.strip() or git_config_maybe_bool(value) is True
 
 
 def git_push_ref_is_bare_name(destination: str) -> bool:
