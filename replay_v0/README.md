@@ -192,8 +192,9 @@ version, both policy-source identities, the corpus-manifest digest, and gate con
 startup captures every corpus file and both recorded-source files once, validates those captured
 bytes, and retains the same immutable bytes for parsing and evaluation. Replacing a validated path
 later therefore cannot change a result under the earlier manifest or policy identity. Process
-identity v11 includes the executable's lexical invocation basename, the resolved executable target's
-bytes and four-octal-digit permission mode, entry-policy bytes, the relative names, exact
+identity v12 includes the executable's lexical invocation basename, the resolved executable target's
+bytes and four-octal-digit permission mode, the name, bytes and mode of each library copied beside
+it (`.dll`, `.dylib`, `.so`, `.so.*`), entry-policy bytes, the relative names, exact
 regular-file bytes, and permission modes for the policy-parent root and entries, configured
 timeout, output-capture quota contract, fixed environment, fixed `0700` runner-owned directory modes on POSIX, and policy-parent
 working-directory contract. It also binds an opaque SHA-256 digest of the selected resolved

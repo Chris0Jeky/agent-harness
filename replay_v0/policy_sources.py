@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
 import hashlib
@@ -671,6 +671,43 @@ def _snapshot_mtimes_are_normalized(root: Path) -> bool:
     return True
 
 
+def _executable_companions(executable: Path) -> list[Path]:
+    """Libraries beside an executable that its private snapshot copies with it."""
+
+    return [
+        companion
+        for companion in executable.parent.iterdir()
+        if companion != executable
+        and companion.is_file()
+        and (
+            companion.suffix.lower() in {".dll", ".dylib", ".so"}
+            or ".so." in companion.name.lower()
+        )
+    ]
+
+
+def _companion_bindings(paths: Iterable[Path]) -> tuple[tuple[str, str, str], ...]:
+    return tuple(
+        sorted((path.name, sha256_file(path), permission_bits(path)) for path in paths)
+    )
+
+
+def executable_companion_bindings(executable: Path) -> tuple[tuple[str, str, str], ...]:
+    """Name, SHA-256 and mode of each library a process snapshot will copy."""
+
+    return _companion_bindings(_executable_companions(executable))
+
+
+def _snapshot_companion_bindings(
+    directory: Path, invocation_name: str
+) -> tuple[tuple[str, str, str], ...]:
+    """Bind everything beside the snapshot executable, so an addition also fails."""
+
+    return _companion_bindings(
+        entry for entry in directory.iterdir() if entry.name != invocation_name
+    )
+
+
 @dataclass(frozen=True)
 class _ProcessInputSnapshot:
     """Private execution paths that contain the exact bound process inputs."""
@@ -680,6 +717,7 @@ class _ProcessInputSnapshot:
     cwd: str
     executable_sha256: str
     executable_permissions: str
+    executable_companions: tuple[tuple[str, str, str], ...]
     policy_sha256: str
     policy_tree_sha256: str
 
@@ -690,6 +728,9 @@ class _ProcessInputSnapshot:
         try:
             actual_executable = sha256_file(executable)
             actual_executable_permissions = permission_bits(executable)
+            actual_companions = _snapshot_companion_bindings(
+                executable.parent, executable.name
+            )
             actual_policy = sha256_file(policy)
             actual_tree = sha256_tree(policy_tree)
             mtimes_are_normalized = _snapshot_mtimes_are_normalized(self.root)
@@ -702,6 +743,7 @@ class _ProcessInputSnapshot:
         if (
             actual_executable != self.executable_sha256
             or actual_executable_permissions != self.executable_permissions
+            or actual_companions != self.executable_companions
             or actual_policy != self.policy_sha256
             or actual_tree != self.policy_tree_sha256
             or not mtimes_are_normalized
@@ -1056,7 +1098,9 @@ class ProcessDecisionSource:
         self.timeout_seconds = float(timeout_seconds)
         self.cwd: str | None = None
         self.environment: dict[str, str] | None = None
-        self.executable_binding: tuple[Path, str, str, str] | None = None
+        self.executable_binding: (
+            tuple[Path, str, str, str, tuple[tuple[str, str, str], ...]] | None
+        ) = None
         self.policy_tree_binding: tuple[Path, str, str] | None = None
         self.snapshot_identity: str | None = None
         self.snapshot_parent: Path | None = None
@@ -1085,6 +1129,7 @@ class ProcessDecisionSource:
         executable_invocation_name: str,
         executable_sha256: str,
         executable_permissions: str,
+        executable_companions: Iterable[tuple[str, str, str]],
         policy_tree_path: str | Path,
         policy_sha256: str,
         policy_tree_sha256: str,
@@ -1100,7 +1145,15 @@ class ProcessDecisionSource:
             or not _SHA256.fullmatch(snapshot_identity)
         ):
             raise ValueError("process input bindings require lowercase SHA-256 digests")
-        if not re.fullmatch(r"[0-7]{4}", executable_permissions):
+        bound_companions = tuple(executable_companions)
+        if any(
+            not _SHA256.fullmatch(digest) for _name, digest, _mode in bound_companions
+        ):
+            raise ValueError("process input bindings require lowercase SHA-256 digests")
+        if not re.fullmatch(r"[0-7]{4}", executable_permissions) or any(
+            not re.fullmatch(r"[0-7]{4}", mode)
+            for _name, _digest, mode in bound_companions
+        ):
             raise ValueError(
                 "process executable binding requires four octal permission digits"
             )
@@ -1119,6 +1172,7 @@ class ProcessDecisionSource:
             executable_invocation_name,
             executable_sha256,
             executable_permissions,
+            bound_companions,
         )
         self.policy_tree_binding = (
             Path(policy_tree_path),
@@ -1188,6 +1242,7 @@ class ProcessDecisionSource:
             executable_invocation_name,
             expected_executable,
             expected_executable_permissions,
+            expected_companions,
         ) = self.executable_binding
         policy_tree_path, expected_policy, expected_tree = self.policy_tree_binding
         try:
@@ -1245,20 +1300,11 @@ class ProcessDecisionSource:
             if os.name != "nt":
                 snapshot_executable.parent.chmod(_RUNNER_DIRECTORY_MODE)
             shutil.copy2(executable_path, snapshot_executable)
-            for companion in executable_path.parent.iterdir():
-                companion_name = companion.name.lower()
-                if (
-                    companion != executable_path
-                    and companion.is_file()
-                    and (
-                        companion.suffix.lower() in {".dll", ".dylib", ".so"}
-                        or ".so." in companion_name
-                    )
-                ):
-                    shutil.copy2(
-                        companion,
-                        snapshot_executable.parent / companion.name,
-                    )
+            for companion in _executable_companions(executable_path):
+                shutil.copy2(
+                    companion,
+                    snapshot_executable.parent / companion.name,
+                )
             shutil.copytree(policy_tree_path, snapshot_policy_tree)
         except (OSError, shutil.Error):
             return self._snapshot_failure(
@@ -1283,6 +1329,9 @@ class ProcessDecisionSource:
         try:
             actual_executable = sha256_file(snapshot_executable)
             actual_executable_permissions = permission_bits(snapshot_executable)
+            actual_companions = _snapshot_companion_bindings(
+                snapshot_executable.parent, executable_invocation_name
+            )
             actual_policy = sha256_file(snapshot_policy)
             actual_tree = sha256_tree(snapshot_policy_tree)
         except OSError:
@@ -1299,6 +1348,7 @@ class ProcessDecisionSource:
             not snapshot_policy.is_file()
             or actual_executable != expected_executable
             or actual_executable_permissions != expected_executable_permissions
+            or actual_companions != expected_companions
             or actual_policy != expected_policy
             or actual_tree != expected_tree
         ):
@@ -1322,6 +1372,7 @@ class ProcessDecisionSource:
             cwd=str(snapshot_policy_tree),
             executable_sha256=expected_executable,
             executable_permissions=expected_executable_permissions,
+            executable_companions=expected_companions,
             policy_sha256=expected_policy,
             policy_tree_sha256=expected_tree,
         )
