@@ -361,8 +361,15 @@ class SensitivePushNarrowingTests(unittest.TestCase):
                 allowed, detail = self.narrowing(args, self.public_sensitive)
                 self.assertFalse(allowed, detail)
 
-    def test_self_sensitive_route_forbids_force_with_lease(self):
+    def test_self_sensitive_route_forbids_every_force_spelling(self):
+        # #467: the route's force refusal must not steer toward the riskier
+        # verb by naming only the exact lease spelling.
         for option in (
+            "--force",
+            "-f",
+            "-uf",
+            "--forc",
+            "--force-w",
             "--force-with-lease",
             "--force-with-lease=feature/demo",
         ):
@@ -373,7 +380,13 @@ class SensitivePushNarrowingTests(unittest.TestCase):
                     remote_resolver=_public_resolver,
                 )
                 self.assertEqual(decision, "deny")
-                self.assertIn("forbids force-with-lease", reason)
+                self.assertIn("forbids force", reason)
+
+    def test_self_sensitive_route_honours_a_cancelled_force(self):
+        allowed, detail = self.narrowing(
+            ["--force", "--no-force", "origin", "feature/demo"], self.public_sensitive
+        )
+        self.assertTrue(allowed, detail)
 
     def test_self_sensitive_route_requires_the_declared_repository(self):
         mismatched = os.path.join(self.root, "public-sensitive-mismatch")

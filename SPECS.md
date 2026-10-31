@@ -548,7 +548,8 @@ declaration grants the same valid `public_synthetic_publication`, the command ex
 declared remote plus one local branch/`HEAD`, that remote has exactly one push URL matching the
 declared GitHub repository, no configured `core.gitProxy`/`core.sshCommand` or declared-remote
 `receivepack`/`vcs` overrides its transport/receiver, and no command-line `--receive-pack`/`--exec`
-or force-with-lease is requested. The declaration never relaxes public repo/gist creation,
+or force (any spelling, force-with-lease included) is requested. The declaration never relaxes
+public repo/gist creation,
 visibility changes, or the `gh api` exfiltration surfaces (since 1.6.28 the `sensitive_data`
 `gh api` guard is narrowed to those surfaces plus non-branch DELETEs; routine PR/issue/comment
 mutations pass).
