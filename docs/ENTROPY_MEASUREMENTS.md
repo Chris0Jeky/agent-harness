@@ -10,8 +10,7 @@ Use the existing harness measurement/ops home and `docs/BENCHMARKS.md` for genui
 results. [Review/oracle PR #290](https://github.com/Chris0Jeky/agent-harness/pull/290) supplies
 the evidence boundaries and source ledger, including the unavailable original research brief.
 [Ops PR #288](https://github.com/Chris0Jeky/agent-harness/pull/288) owns its existing ops
-measurements; [#233](https://github.com/Chris0Jeky/agent-harness/issues/233) owns workstream-cap
-interpretation. This proposal settles neither routing nor capacity policy.
+measurements. This proposal settles neither routing nor capacity policy.
 
 These detectors measure possible maintenance debt, not whether a PR or agent is good. A high
 merge count is neither the denominator for usefulness nor proof that an agent caused drift.

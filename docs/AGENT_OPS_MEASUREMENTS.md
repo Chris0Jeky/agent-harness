@@ -22,10 +22,6 @@ inferred, unavailable and stale. A repository may deliberately have no wired flo
 activate one to satisfy an evidence table, or label absent runtime observation as a successful
 canary. A worktree lease is cooperative coordination, not proof against non-cooperating writers.
 
-The declared workstream cap remains unchanged. [#233](https://github.com/Chris0Jeky/agent-harness/issues/233)
-owns the unresolved collision-versus-review-bandwidth decision; these measurements can inform it,
-not decide it by reporting a more convenient count.
-
 ## Measurement unit: the logical job, not the chat session
 
 A future read-only adapter should join existing native receipts to one canonical work item.

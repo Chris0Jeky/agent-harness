@@ -138,7 +138,7 @@ E3: use Taskdeck's existing dogfood programme for one manual before/after task c
 Correctness results, synthetic practice and organic use stay separate. No audience or retention
 claim follows from a successful synthetic task.
 
-These are proposed starting budgets, not research-derived constants or changes to #233. Log
+These are proposed starting budgets, not research-derived constants. Log
 experiments and follow-up ownership in the PR/issue conversation; only executed results belong
 in `docs/BENCHMARKS.md`. Keep the first three-repo wave in draft until source provenance,
 applicable local checks and the changed procedures receive the required review.
