@@ -106,4 +106,4 @@ also lints, formats and compiles the two added Python files with its pinned tool
 Remaining work: adapters from actual coordinator/native receipts, fixed-cohort collection,
 blocked-agent heartbeat/effect observation, and review-capacity experiments. No live costs,
 productivity improvements or runtime qualifications are claimed here. Follow #288's evidence
-boundaries and #233's existing workstream limits. `HUMAN_TODO.md` remains unchanged.
+boundaries. `HUMAN_TODO.md` remains unchanged.

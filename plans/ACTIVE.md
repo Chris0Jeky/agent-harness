@@ -13,7 +13,7 @@ documented limitations in [FLOOR_LIMITATIONS](../FLOOR_LIMITATIONS.md). No thaw 
 any repair would stay undeployed behind H-22.
 [#513](https://github.com/Chris0Jeky/agent-harness/issues/513) stays parked: a minimum share of
 recall-testing cases is a promotion-policy threshold, and
-[LEARNING_EVAL_SAFETY](../docs/LEARNING_EVAL_SAFETY.md) keeps that authority out of source repairs.
+[LEARNING_EVAL_SAFETY](../docs/LEARNING_EVAL_SAFETY.md) records that a repair does not invent one.
 
 ## Source maintenance checkpoint — 2026-10-29
 
