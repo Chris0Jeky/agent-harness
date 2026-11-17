@@ -955,7 +955,8 @@ commits only; the rest tracked or declined on the thread), one fix round verifie
 fix diff (a fresh-context pass is owed only when the fixes changed logic or the risk boundary,
 global law 2g; a manual `@codex review` is never a per-fix step, global law 2f) — then ship or park. Tier changes WHO reviews and how many eyes the single
 round gets (T1-T3 one independent pass, with a second distinct lens at T3 only for genuinely
-high-risk work; T4 two adversarial reviews), never how many rounds run.
+high-risk work; T4 the repo's declared full gate (canonically two adversarial reviews)), never
+how many rounds run.
 
 ## §15 Learning-plane contracts (L1 lab; draft 2026-10-08)
 

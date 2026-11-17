@@ -239,7 +239,8 @@ formally demote; permanently red gates teach gate-ignoring.
 
 ### T4 — Live wire
 Everything in T3, plus:
-- **Canonical merge gate**: 2 independent adversarial reviews — at least one from the
+- **Canonical merge gate** (the default content of a T4 repo's declared full gate; a repo's
+  `tier.json` or AGENTS.md may tighten it): 2 independent adversarial reviews — at least one from the
   toolset-restricted no-Bash/no-Write reviewer agent — + green CI + the requested bot review
   triaged once by the severity bar (bots caught real bugs self-review missed 3+ recorded
   times) + never `--delete-branch` a stacked base. T4 raises how many independent eyes the
