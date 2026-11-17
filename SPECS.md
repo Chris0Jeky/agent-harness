@@ -655,27 +655,28 @@ blast-radius ladder.
 
 | Task class | Model tier | Effort | Walls vs tripwires |
 |---|---|---|---|
-| Deny floor / dispatcher changes, promotion audits | top | xhigh | wall: agent `model:` pins + review requirement |
-| Region maps, skills, ADRs, global laws | top | xhigh | convention |
+| Deny floor / dispatcher changes, promotion audits | top | high (xhigh only for the rarest hardest problem) | wall: agent `model:` pins + review requirement |
+| Region maps, skills, ADRs, global laws | top | high (xhigh only for the rarest hardest problem) | convention |
 | Merge decisions; second lens on high-risk work | top | high (xhigh only if irreversible / wide blast radius) | wall at T4 (gate), tripwire below |
 | Adversarial review gate | default | high | convention |
 | Code implementation, debugging, feature slices in mapped regions | default | high | convention |
-| Gardener triage, tombstone classification, promotion routing | default | low | wall: `~/.claude/agents/gardener.md` pin + PR-only output |
-| Judgment-bearing subagent work (a lens, a call, a triage), lookups, conversation | default | low | convention |
-| Bulk mechanical sweeps, doc rotation, formatting, test running — INCLUDING when fanned out across subagents | cheap | medium–high (never low) | convention |
+| Gardener triage, tombstone classification, promotion routing | default | high | wall: `~/.claude/agents/gardener.md` pin + PR-only output |
+| Judgment-bearing subagent work (a lens, a call, a triage), lookups, conversation | default | high | convention |
+| Bulk mechanical sweeps, doc rotation, formatting, test running — INCLUDING when fanned out across subagents | cheap | high | convention |
 
-Effort is the first dial (cheaper than a model swap). Default-up when unsure. Interactive
-sessions: pick per the table at session start; don't leave xhigh pinned globally for
+Effort is the first dial (cheaper than a model swap). High is the base effort for every row
+(deviations only as the `model-effort-routing` skill lists them). Default-up when unsure.
+Interactive sessions: pick per the table at session start; don't leave xhigh pinned globally for
 maintenance work.
 
 **Triage and classification are judgment, not mechanics** — deciding what matters is a call, so
 they sit on the default tier even though they run on a schedule. A cheap tier only earns work
 that is genuinely simple, well-specified, and hard to get wrong; and when it does, it runs at
-medium/high effort, because a cheap model at low effort compounds two handicaps.
+the base effort, never low, because a cheap model at low effort compounds two handicaps.
 
 **Delegation is not a task class.** A subagent is routed by the work it does, not by the fact
 that it was delegated: wide mechanical fan-out follows the cheap row above and BLUEPRINT §3
-(medium/high effort, never low); a subagent asked for an independent lens or a call follows the
+(the base effort, never low); a subagent asked for an independent lens or a call follows the
 default row. If a task matches both rows, the DEFAULT row wins: the ladder routes up when the
 class is unclear, because a cheap model on judgment work is the expensive mistake.
 
@@ -862,8 +863,9 @@ Template layout: `templates/tier1..tier4/` overlays + `templates/hooks/` + `temp
 
 ## §10 Gardener spec
 
-- Invocation: a Claude Code scheduled routine configured with the default-tier model at effort
-  low, weekly per ACTIVE repo only. Windows Task Scheduler fallback: `claude -p "<gardener
+- Invocation: a Claude Code scheduled routine configured with the default-tier model at the base
+  effort (high; deviations only as the `model-effort-routing` skill lists them), weekly per ACTIVE
+  repo only. Windows Task Scheduler fallback: `claude -p "<gardener
   prompt>"` with the SESSION model bound through the routine/settings model setting, resolved
   from the `model-effort-routing` skill at configuration time (rule 4 below explains why the
   command line is not an option). Binding it is not optional: a headless `claude -p` run is a

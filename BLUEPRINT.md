@@ -127,7 +127,7 @@ these defaults, and `merge: gated`/`human-only` means exactly that at any tier.
 | T1 | **Sandbox** | Only irreversible loss matters (secrets, privacy, money) | ≤1k | none | push+merge free behind global law 2's gate | hq-private (+`sensitive_data`), LeetCode, CV-builder, new prototypes |
 | T2 | **Daily driver** | Lost work / lost context costs real hours | ≤3k | none (optional fast pre-commit) | push+merge free behind global law 2's gate | extract-api (reference implementation), NavSentinel |
 | T3 | **Workshop** | Regressions are expensive; sole stakeholder | ≤6k | required lane, single-OS, <10 min | push+merge free behind global law 2's gate, plus a second lens for high-risk work | Taskdeck (after diet), wealthlens-hq |
-| T4 | **Live wire** | Other people, money, or production data | ≤8k | full gate + branch protection | push/merge behind the full declared gate (two independent reviews + green CI) | olb/series_tools_python, staticprofit (if revived) |
+| T4 | **Live wire** | Other people, money, or production data | ≤8k | full gate + branch protection | push/merge behind the repo's declared full gate | olb/series_tools_python, staticprofit (if revived) |
 
 **Overlay flags** (orthogonal to tier, set in `tier.json`):
 - `sensitive_data` — where a floor is wired, adds privacy denies (block pushes to public remotes,
@@ -374,9 +374,10 @@ structurally required (review). T0/T1 never fan out. Heuristics, not laws — de
 "disjoint" illusory (worktree waves leaked 5/6 despite protocols); when a fan-out produces
 merge conflicts, that's evidence the regions aren't real yet. **Right-size the fleet**: default
 ≤3–5 subagents, a broad sweep/audit ≤8–12, never a reflexive fleet; put wide mechanical fan-out
-on the cheap tier at medium/high effort (never low — a cheap model at low effort compounds two
-handicaps) and reserve the top tier at high/xhigh for the narrow judgment core. Subagents that
-still need judgment go on the default tier at low effort, not the cheap one. This is what stops
+on the cheap tier and reserve the top tier for the narrow judgment core, every tier at the base
+effort (high; deviations only as the `model-effort-routing` skill lists them — never low on the
+cheap tier, where low effort compounds two handicaps). Subagents that still need judgment go on
+the default tier, not the cheap one. This is what stops
 a top-model session from spawning a subagent fleet that drains the
 budget before finishing — the `model-effort-routing` skill (§6) is the home for the sizing rules.
 
@@ -391,8 +392,9 @@ stamps; the budget script flags >90 days; human edits outside the harness are th
 `capture (hooks, zero inline tokens) → triage (scheduled agent) → promote/prune
 (ONE ≤100-line PR) → ratify (human merges)`.
 
-- **Cadence**: weekly per active repo, default-tier model at effort low (§5 — its triage and
-  promotion calls are judgment; low effort is what keeps it cheap enough to schedule), runs
+- **Cadence**: weekly per active repo, default-tier model at the base effort (high; deviations
+  only as the `model-effort-routing` skill lists them — §5: its triage and promotion calls are
+  judgment; the one-PR output and the auto-pause below keep it cheap enough to schedule), runs
   against its own worktree
   (never the live checkout — one-writer rule per checkout). SessionStart nudges if the ledger
   exceeds 25 entries or 14 days untriaged.
@@ -425,16 +427,16 @@ blast-radius ladder in §1.
 
 | Work | Model tier | Effort |
 |---|---|---|
-| Harness growth: deny floor/dispatcher, region maps, skills, hooks, ADRs, global laws; promotion/demotion audits; anything irreversible | top | xhigh |
+| Harness growth: deny floor/dispatcher, region maps, skills, hooks, ADRs, global laws; promotion/demotion audits; anything irreversible | top | high (xhigh only for the rarest hardest problem) |
 | Merge decisions; second lens on high-risk work | top | high (xhigh when irreversible or wide blast radius) |
 | Adversarial review gate | default | high |
 | Code implementation, debugging, feature slices inside mapped regions, routine PRs | default | high |
-| Gardener triage, tombstone classification, routing/promotion calls, judgment-bearing subagent work, lookups | default | low |
-| Doc rotation, formatting sweeps, mechanical transforms that are hard to get wrong — including wide mechanical fan-out (§3) | cheap | medium–high, never low |
+| Gardener triage, tombstone classification, routing/promotion calls, judgment-bearing subagent work, lookups | default | high |
+| Doc rotation, formatting sweeps, mechanical transforms that are hard to get wrong — including wide mechanical fan-out (§3) | cheap | high |
 
 **Delegation is not a task class.** Route a subagent by what it is DOING, never by the fact that
 it is a subagent: a mechanical sweep handed to eight workers is still mechanical (cheap tier,
-medium/high effort, §3), and a single worker asked for an independent judgment is still judgment.
+base effort, §3), and a single worker asked for an independent judgment is still judgment.
 
 Triage and classification sit on the **default** tier, not the cheap one: deciding what matters
 is judgment wearing mechanical clothes. That misclassification is what kept the Gardener
@@ -512,8 +514,9 @@ from gone.
 - **Global agents** (`~/.claude/agents/`): `reviewer.md` (NO Bash/Write — structural; a
   "read-only" instruction to a Bash-capable agent demonstrably does not hold),
   `gardener.md` — the canonical path for every reference to it is `~/.claude/agents/gardener.md`
-  (default-tier model at low effort — cheap enough to run on a schedule, but its
-  triage and promotion calls are judgment, not mechanics; write-scoped to docs/ + .claude/),
+  (default-tier model at the base effort (high; deviations only as the `model-effort-routing`
+  skill lists them) — its triage and promotion calls are judgment, not mechanics; write-scoped
+  to docs/ + .claude/),
   `worktree-worker.md`.
 - **Global process skills** stay ≤40 lines, stack-agnostic (safe-shell, small-safe-slice,
   verification-closeout — already good); plus three ≤80-line workflow-mode skills: `guided-walkthrough`
@@ -538,7 +541,7 @@ from gone.
   vendor, dead entries removed at migration.
 - **Token instrumentation**: record a per-repo baseline (typical session cost) in tier.json at
   migration; the Gardener PR reports its own token spend; scheduled agents carry a hard spend
-  cap (default-tier model at effort low + one ≤100-line PR) and the auto-pause rule is the kill
+  cap (default-tier model at the base effort + one ≤100-line PR) and the auto-pause rule is the kill
   switch.
   The blueprint's promise is token economy — measure it or it's a vibe.
 
